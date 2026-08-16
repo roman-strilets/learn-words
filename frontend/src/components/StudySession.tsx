@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 
 import { api } from '../api/client'
-import type { Exercise, SessionPayload } from '../api/types'
+import type { AnswerResponse, Exercise, SessionPayload } from '../api/types'
 import { ChoiceCard } from './exercises/ChoiceCard'
 import { DictationCard } from './exercises/DictationCard'
 import { Feedback } from './exercises/Feedback'
@@ -13,13 +13,6 @@ import { ErrorBox } from './ui'
 
 /** Через сколько карточек слово вернётся в очередь после ответа. */
 const REPEAT_GAP = 3
-const CORRECT_FLASH_MS = 900
-
-interface PendingFeedback {
-  correct: boolean
-  correctAnswer: string
-  next: Exercise | null
-}
 
 function insertWithGap(queue: Exercise[], item: Exercise): Exercise[] {
   const next = queue.slice()
@@ -35,7 +28,7 @@ interface Props {
 export function StudySession({ session, onFinished }: Props) {
   const [introIndex, setIntroIndex] = useState(0)
   const [queue, setQueue] = useState<Exercise[]>(session.exercises)
-  const [feedback, setFeedback] = useState<PendingFeedback | null>(null)
+  const [feedback, setFeedback] = useState<AnswerResponse | null>(null)
   const [tally, setTally] = useState({ answered: 0, correct: 0 })
   // Счётчик показов: входит в key карточки, чтобы состояние ввода
   // гарантированно сбрасывалось даже при двух одинаковых карточках подряд
@@ -75,11 +68,7 @@ export function StudySession({ session, onFinished }: Props) {
         answered: value.answered + 1,
         correct: value.correct + (data.correct ? 1 : 0),
       }))
-      setFeedback({
-        correct: data.correct,
-        correctAnswer: data.correct_answer,
-        next: data.next_exercise,
-      })
+      setFeedback(data)
     },
     onError: () => {
       submitting.current = false
@@ -89,19 +78,12 @@ export function StudySession({ session, onFinished }: Props) {
   const advance = useCallback(() => {
     setQueue((items) => {
       const rest = items.slice(1)
-      return feedback?.next ? insertWithGap(rest, feedback.next) : rest
+      return feedback?.next_exercise ? insertWithGap(rest, feedback.next_exercise) : rest
     })
     setFeedback(null)
     setCardId((id) => id + 1)
     submitting.current = false
   }, [feedback])
-
-  // Верный ответ не требует подтверждения — гасим плашку сами
-  useEffect(() => {
-    if (!feedback?.correct) return
-    const timer = window.setTimeout(advance, CORRECT_FLASH_MS)
-    return () => window.clearTimeout(timer)
-  }, [feedback, advance])
 
   const handleAnswer = useCallback(
     ({ answer, usedHint }: AnswerSubmit) => {
@@ -177,7 +159,10 @@ export function StudySession({ session, onFinished }: Props) {
       {feedback ? (
         <Feedback
           correct={feedback.correct}
-          correctAnswer={feedback.correctAnswer}
+          word={feedback.word}
+          translation={feedback.translation}
+          example={feedback.example}
+          exampleTranslation={feedback.example_translation}
           onContinue={advance}
         />
       ) : null}

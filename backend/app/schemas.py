@@ -177,6 +177,11 @@ class AnswerRequest(BaseModel):
 class AnswerResponse(BaseModel):
     correct: bool
     correct_answer: str
+    # Карточка слова целиком — плашка результата показывает её ещё раз
+    word: str
+    translation: str
+    example: str | None = None
+    example_translation: str | None = None
     quality: int
     repeat_in_session: bool
     next_exercise: Exercise | None = None

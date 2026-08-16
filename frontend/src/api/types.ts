@@ -108,6 +108,11 @@ export interface AnswerPayload {
 export interface AnswerResponse {
   correct: boolean
   correct_answer: string
+  /** Карточка слова целиком — плашка результата показывает её ещё раз */
+  word: string
+  translation: string
+  example: string | null
+  example_translation: string | null
   quality: number
   repeat_in_session: boolean
   next_exercise: Exercise | null

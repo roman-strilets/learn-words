@@ -65,6 +65,14 @@ export function LettersCard({
     })
   }
 
+  const clearSlot = (maskIndex: number) => {
+    setSlots((current) =>
+      current.map((slot) =>
+        slot.maskIndex === maskIndex ? { ...slot, char: null, tile: null } : slot,
+      ),
+    )
+  }
+
   const removeLast = () => {
     setSlots((current) => {
       const index = current.map((slot) => slot.char !== null).lastIndexOf(true)
@@ -98,7 +106,7 @@ export function LettersCard({
     return () => window.clearTimeout(timer)
   }, [rejected])
 
-  // Все ячейки заполнены — отправляем ответ, отдельной кнопки на макете нет
+  // Все ячейки заполнены — проверяем сразу, отдельной кнопки нет
   const filled = slots.every((slot) => slot.char !== null)
   useEffect(() => {
     if (!filled || locked) return
@@ -141,7 +149,7 @@ export function LettersCard({
               key={index}
               type="button"
               disabled={locked}
-              onClick={removeLast}
+              onClick={() => clearSlot(index)}
               className={`flex size-14 items-center justify-center bg-white text-2xl font-semibold text-ink ${
                 index === activeMaskIndex ? 'ring-2 ring-accent' : ''
               }`}
@@ -176,7 +184,7 @@ export function LettersCard({
 
       <p className="text-center text-sm text-muted">
         Вы можете выбирать буквы мышью или вводить их с клавиатуры —
-        раскладка не важна
+        раскладка не важна. Нажмите на букву в слове, чтобы стереть её
       </p>
 
       <div className="flex gap-3 text-accent">

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 
 import type { ChoiceExercise } from '../../api/types'
 import { isTypingTarget, useHotkeys } from '../../hooks/useHotkeys'
@@ -12,14 +12,13 @@ export function ChoiceCard({
   locked,
 }: ExerciseCardProps<ChoiceExercise>) {
   const { speak, autoplay, supported } = useSpeech()
-  const [usedHint, setUsedHint] = useState(false)
   const isEnToRu = exercise.type === 'choice_en_ru'
 
   useEffect(() => {
-    setUsedHint(false)
     if (isEnToRu && autoplay) speak(exercise.prompt)
   }, [exercise.word_id, exercise.prompt, isEnToRu, autoplay, speak])
 
+  // Подсказки здесь нет: варианты уже на экране, поэтому usedHint всегда false
   useHotkeys(
     Object.fromEntries(
       exercise.options.map((option, index) => [
@@ -27,7 +26,7 @@ export function ChoiceCard({
         (event: KeyboardEvent) => {
           if (isTypingTarget(event.target)) return
           event.preventDefault()
-          onAnswer({ answer: option, usedHint })
+          onAnswer({ answer: option, usedHint: false })
         },
       ]),
     ),
@@ -41,13 +40,7 @@ export function ChoiceCard({
       </Caption>
 
       <div className="flex items-center gap-4">
-        <Prompt
-          hint={exercise.hint}
-          hintShown={usedHint}
-          onHint={() => setUsedHint(true)}
-        >
-          {exercise.prompt}
-        </Prompt>
+        <Prompt>{exercise.prompt}</Prompt>
         {isEnToRu ? (
           <SpeakButton onClick={() => speak(exercise.prompt)} disabled={!supported} />
         ) : null}
@@ -59,10 +52,12 @@ export function ChoiceCard({
             key={option}
             type="button"
             disabled={locked}
-            onClick={() => onAnswer({ answer: option, usedHint })}
-            className="relative rounded-md border border-hairline px-6 py-6 text-center text-2xl text-ink transition-colors hover:border-accent hover:bg-accent/5 disabled:cursor-not-allowed disabled:opacity-60"
+            onClick={() => onAnswer({ answer: option, usedHint: false })}
+            className="group relative flex cursor-pointer items-center justify-center rounded-2xl border border-hairline bg-white px-12 py-7 text-center text-2xl font-medium text-ink shadow-sm transition duration-200 ease-out hover:-translate-y-0.5 hover:border-accent hover:bg-accent/5 hover:text-accent hover:shadow-lg focus-visible:border-accent focus-visible:ring-4 focus-visible:ring-accent/20 focus-visible:outline-none active:translate-y-0 active:scale-[0.99] disabled:pointer-events-none disabled:opacity-50 disabled:shadow-none"
           >
-            <span className="absolute top-2 left-3 text-sm text-muted">{index + 1}</span>
+            <span className="absolute top-3 left-3 flex size-7 items-center justify-center rounded-lg bg-hairline/60 text-sm font-semibold text-muted transition-colors duration-200 group-hover:bg-accent group-hover:text-white">
+              {index + 1}
+            </span>
             {option}
           </button>
         ))}

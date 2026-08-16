@@ -281,6 +281,10 @@ def answer_exercise(
     return AnswerResponse(
         correct=correct,
         correct_answer=correct_answer_for(word, request.exercise),
+        word=word.word,
+        translation=word.translation,
+        example=word.example,
+        example_translation=word.example_translation,
         quality=quality,
         repeat_in_session=after.status == WordStatus.LEARNING,
         next_exercise=_next_exercise(session, word, after, now, rng),
