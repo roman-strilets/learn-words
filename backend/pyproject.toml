@@ -1,0 +1,45 @@
+[project]
+name = "learn-words-backend"
+version = "0.1.0"
+description = "API для изучения английских слов с интервальными повторениями"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.3",
+    "sqlalchemy>=2.0.52",
+    "alembic>=1.19.1",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.15.0",
+    "rapidfuzz>=3.14.5",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "httpx2>=2.10.0",
+    "ruff>=0.16.3",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff.lint.flake8-bugbear]
+# Depends()/Query()/Path() в значениях по умолчанию — штатная идиома FastAPI
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+]

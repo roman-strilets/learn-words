@@ -1,0 +1,26 @@
+{
+  "name": "learn-words",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "frontend"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"yarn dev:api\" \"yarn dev:web\"",
+    "dev:api": "uv run --directory backend uvicorn app.main:app --reload --port 8000",
+    "dev:web": "yarn workspace frontend dev",
+    "build": "yarn workspace frontend build",
+    "typecheck": "yarn workspace frontend typecheck",
+    "db:upgrade": "uv run --directory backend alembic upgrade head",
+    "db:import": "uv run --directory backend python -m app.cli import ../dictionary.csv",
+    "setup": "uv sync --directory backend && yarn install && yarn db:upgrade && yarn db:import",
+    "test:api": "uv run --directory backend pytest -q"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5"
+  },
+  "packageManager": "yarn@1.22.22"
+}

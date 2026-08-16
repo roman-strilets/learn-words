@@ -1,0 +1,81 @@
+"""Импорт словаря: BOM, дубли, идемпотентность."""
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from app.cli import import_csv
+from app.models import Word
+
+# Файл намеренно записывается с BOM — как исходный dictionary.csv
+CSV_BODY = '''"word","translation","example","example_translation"
+"outsider","посторонний","He is an outsider.","Он посторонний."
+"budge","сдвинуть с места","",""
+"Outsider","чужак","",""
+"outsider","посторонний","",""
+"go after","преследовать","",""
+"  spaced  ","с пробелами","",""
+"","пусто","",""
+"noword","","",""
+'''
+
+
+def _write_csv(tmp_path):
+    path = tmp_path / "dict.csv"
+    path.write_text(CSV_BODY, encoding="utf-8-sig")
+    return path
+
+
+def test_import_deduplicates_and_merges(tmp_path, db_session: Session):
+    report = import_csv(_write_csv(tmp_path), db_session)
+
+    assert report.rows == 8
+    assert report.skipped == 2  # строка без слова и строка без перевода
+    assert report.created == 4  # outsider, budge, go after, spaced
+
+    outsider = db_session.scalar(select(Word).where(Word.word_key == "outsider"))
+    # Регистр не создаёт второй записи, а новое значение дописывается к переводу
+    assert outsider.translation == "посторонний; чужак"
+    # Повторная строка с тем же переводом ничего не добавляет
+    assert outsider.translation.count("посторонний") == 1
+    assert outsider.example == "He is an outsider."
+
+
+def test_import_strips_and_normalizes_keys(tmp_path, db_session: Session):
+    import_csv(_write_csv(tmp_path), db_session)
+
+    spaced = db_session.scalar(select(Word).where(Word.word_key == "spaced"))
+    assert spaced is not None
+    assert spaced.word == "spaced"
+
+
+def test_import_fills_empty_example_on_second_pass(tmp_path, db_session: Session):
+    first = tmp_path / "a.csv"
+    first.write_text(
+        '"word","translation","example","example_translation"\n"brink","край","",""\n',
+        encoding="utf-8-sig",
+    )
+    second = tmp_path / "b.csv"
+    second.write_text(
+        '"word","translation","example","example_translation"\n'
+        '"brink","край","Pushed to the brink.","На край."\n',
+        encoding="utf-8-sig",
+    )
+
+    import_csv(first, db_session)
+    import_csv(second, db_session)
+
+    brink = db_session.scalar(select(Word).where(Word.word_key == "brink"))
+    assert brink.example == "Pushed to the brink."
+    assert brink.example_translation == "На край."
+
+
+def test_import_is_idempotent(tmp_path, db_session: Session):
+    path = _write_csv(tmp_path)
+    import_csv(path, db_session)
+    count_after_first = db_session.scalar(select(func.count(Word.id)))
+
+    second = import_csv(path, db_session)
+
+    assert second.created == 0
+    assert second.merged == 0
+    assert db_session.scalar(select(func.count(Word.id))) == count_after_first

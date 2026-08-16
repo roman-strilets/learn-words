@@ -1,0 +1,57 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-ink: #2c3e50;
+  --color-ink-soft: #56687a;
+  --color-muted: #9aa7b1;
+  --color-hairline: #dfe3e6;
+  --color-panel: #e7e7e7;
+  --color-accent: #255183;
+  --color-accent-hover: #1c3f68;
+  --color-neutral-btn: #c4c4c4;
+  --color-neutral-btn-hover: #b3b3b3;
+  --color-correct: #3f9c53;
+  --color-correct-soft: #eaf5ec;
+  --color-wrong: #cf4a45;
+  --color-wrong-soft: #fdeeed;
+  --color-bulb: #e8b931;
+
+  --font-sans: 'Inter', 'Helvetica Neue', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: #fff;
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Пунктирное подчёркивание перевода — как на карточке знакомства */
+.underline-dashed {
+  border-bottom: 2px dashed var(--color-hairline);
+  padding-bottom: 0.25rem;
+}
+
+/* Отклик на набранную букву, которой нет в банке */
+@keyframes nudge {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-5px);
+  }
+  75% {
+    transform: translateX(5px);
+  }
+}
+
+.nudge {
+  animation: nudge 0.25s ease-in-out;
+}

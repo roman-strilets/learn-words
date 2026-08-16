@@ -1,0 +1,114 @@
+from datetime import datetime
+from enum import StrEnum
+
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.clock import utcnow
+from app.db import Base
+
+
+class WordStatus(StrEnum):
+    """Состояние слова в изучении.
+
+    NEW не хранится в базе: у нового слова просто нет строки в `progress`.
+    """
+
+    LEARNING = "learning"  # проходит шаги первого знакомства
+    REVIEW = "review"  # выпущено, планируется по SM-2
+    KNOWN = "known"  # помечено «уже знаю», не показывается
+    SUSPENDED = "suspended"  # отложено вручную
+
+
+class ExerciseType(StrEnum):
+    INTRO = "intro"
+    CHOICE_RU_EN = "choice_ru_en"
+    CHOICE_EN_RU = "choice_en_ru"
+    LETTERS = "letters"
+    DICTATION = "dictation"
+
+
+class Word(Base):
+    __tablename__ = "words"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    word: Mapped[str] = mapped_column(String(128), nullable=False)
+    # lower(trim(word)) — ключ дедупликации при импорте и ручном добавлении
+    word_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    translation: Mapped[str] = mapped_column(Text, nullable=False)
+    example: Mapped[str | None] = mapped_column(Text, nullable=True)
+    example_translation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    progress: Mapped["Progress | None"] = relationship(
+        back_populates="word",
+        cascade="all, delete-orphan",
+        uselist=False,
+        lazy="selectin",
+    )
+
+    def __repr__(self) -> str:
+        return f"<Word {self.id} {self.word!r}>"
+
+
+class Progress(Base):
+    """Прогресс по слову. Строка появляется, когда слово взято в изучение."""
+
+    __tablename__ = "progress"
+
+    word_id: Mapped[int] = mapped_column(
+        ForeignKey("words.id", ondelete="CASCADE"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default=WordStatus.LEARNING)
+    # индекс шага первого знакомства; актуален только при status = learning
+    step: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    repetitions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ease: Mapped[float] = mapped_column(Float, nullable=False, default=2.5)
+    interval_days: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    due_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    lapses: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    word: Mapped[Word] = relationship(back_populates="progress")
+
+    __table_args__ = (Index("ix_progress_status_due_at", "status", "due_at"),)
+
+    def __repr__(self) -> str:
+        return f"<Progress word={self.word_id} {self.status} step={self.step} due={self.due_at}>"
+
+
+class ReviewLog(Base):
+    """По строке на каждый ответ: нужен для статистики и для перехода на FSRS."""
+
+    __tablename__ = "review_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    word_id: Mapped[int] = mapped_column(
+        ForeignKey("words.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    exercise: Mapped[str] = mapped_column(String(24), nullable=False)
+    correct: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    used_hint: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    quality: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status_before: Mapped[str] = mapped_column(String(16), nullable=False)
+    status_after: Mapped[str] = mapped_column(String(16), nullable=False)
+    ease_after: Mapped[float] = mapped_column(Float, nullable=False)
+    interval_after: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, index=True
+    )
+
+
+class Setting(Base):
+    """Настройки приложения в виде key/value, чтобы менять их без миграций."""
+
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
