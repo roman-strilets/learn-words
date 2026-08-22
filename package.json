@@ -9,8 +9,9 @@
     "node": ">=22.12.0"
   },
   "scripts": {
+    "predev": "cp -n .env.example .env 2>/dev/null || true",
     "dev": "concurrently -n api,web -c cyan,magenta \"yarn dev:api\" \"yarn dev:web\"",
-    "dev:api": "uv run --directory backend uvicorn app.main:app --reload --port 8000",
+    "dev:api": "uv run --directory backend --env-file ../.env uvicorn app.main:app --reload",
     "dev:web": "yarn workspace frontend dev",
     "build": "yarn workspace frontend build",
     "typecheck": "yarn workspace frontend typecheck",
