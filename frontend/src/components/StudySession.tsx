@@ -97,7 +97,7 @@ export function StudySession({ session, onFinished }: Props) {
   }, [feedback])
 
   const handleAnswer = useCallback(
-    ({ answer, usedHint }: AnswerSubmit) => {
+    ({ answer, usedHint, attempt }: AnswerSubmit) => {
       if (!current || submitting.current) return
       submitting.current = true
       answerMutation.mutate({
@@ -105,6 +105,7 @@ export function StudySession({ session, onFinished }: Props) {
         exercise: current.type,
         answer,
         used_hint: usedHint,
+        attempt,
         duration_ms: Date.now() - startedAt.current,
       })
     },

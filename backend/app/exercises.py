@@ -207,6 +207,7 @@ def build_exercise(
             word_id=word.id,
             prompt=word.translation,
             mask=build_mask(word.word),
+            solution=word.word,
             letters=build_letter_bank(word.word, _stable_rng(word.id, attempt)),
             show_letters=show_letters,
             hint=first_letter_hint(word.word),

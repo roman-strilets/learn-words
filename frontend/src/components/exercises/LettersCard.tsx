@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import type { LettersExercise } from '../../api/types'
 import { isTypingTarget, useHotkeys } from '../../hooks/useHotkeys'
@@ -16,12 +16,13 @@ interface Slot {
   tile: number | null
 }
 
+/** Индексы ячеек под буквы в порядке ввода. */
+function letterPositions(mask: string): number[] {
+  return mask.split('').flatMap((char, index) => (char === '_' ? [index] : []))
+}
+
 function buildSlots(mask: string): Slot[] {
-  return mask
-    .split('')
-    .map((char, maskIndex) => ({ char, maskIndex }))
-    .filter((item) => item.char === '_')
-    .map((item) => ({ maskIndex: item.maskIndex, char: null, tile: null }))
+  return letterPositions(mask).map((maskIndex) => ({ maskIndex, char: null, tile: null }))
 }
 
 function assemble(mask: string, slots: Slot[]): string {
@@ -42,12 +43,23 @@ export function LettersCard({
   const [usedHint, setUsedHint] = useState(false)
   // Нонс, а не флаг: каждое новое отклонение должно перезапускать анимацию
   const [rejected, setRejected] = useState(0)
+  // Промахи при сборке — сигнал для расписания: слово знали нетвёрдо
+  const [mistakes, setMistakes] = useState(0)
+
+  const positions = useMemo(() => letterPositions(exercise.mask), [exercise.mask])
+
+  // Позиция следующей буквы живёт в ref, а не в slots: нажатия приходят
+  // быстрее, чем React перерисовывает состояние, и по стейту при быстром
+  // наборе две буквы подряд метили бы в одну и ту же ячейку.
+  const cursor = useRef(0)
 
   useEffect(() => {
     setSlots(buildSlots(exercise.mask))
     setBankVisible(exercise.show_letters)
     setUsedHint(false)
     setRejected(0)
+    setMistakes(0)
+    cursor.current = 0
   }, [exercise.word_id, exercise.mask, exercise.show_letters])
 
   const usedTiles = useMemo(
@@ -55,49 +67,57 @@ export function LettersCard({
     [slots],
   )
 
+  /** Буква, которую ждёт ячейка. Слово известно карточке только ради этого. */
+  const expectedAt = (index: number) =>
+    exercise.solution[positions[index]]?.toUpperCase() ?? ''
+
   const place = (char: string, tile: number | null) => {
+    const index = cursor.current
+    if (index >= positions.length) return
+
+    if (char !== expectedAt(index)) {
+      // Не на своё место букву не ставим: собрать неверно нельзя
+      setRejected((tick) => tick + 1)
+      setMistakes((count) => count + 1)
+      return
+    }
+
+    cursor.current = index + 1
     setSlots((current) => {
-      const index = current.findIndex((slot) => slot.char === null)
-      if (index === -1) return current
       const next = current.slice()
       next[index] = { ...next[index], char, tile }
       return next
     })
   }
 
-  const clearSlot = (maskIndex: number) => {
+  /** Стереть букву и всё после неё: порядок строгий, дырка в середине не нужна. */
+  const clearFrom = (index: number) => {
+    if (index < 0 || index >= cursor.current) return
+    cursor.current = index
     setSlots((current) =>
-      current.map((slot) =>
-        slot.maskIndex === maskIndex ? { ...slot, char: null, tile: null } : slot,
+      current.map((slot, slotIndex) =>
+        slotIndex >= index ? { ...slot, char: null, tile: null } : slot,
       ),
     )
   }
 
-  const removeLast = () => {
-    setSlots((current) => {
-      const index = current.map((slot) => slot.char !== null).lastIndexOf(true)
-      if (index === -1) return current
-      const next = current.slice()
-      next[index] = { ...next[index], char: null, tile: null }
-      return next
-    })
-  }
+  const removeLast = () => clearFrom(cursor.current - 1)
 
   const typeLetter = (char: string) => {
-    if (bankVisible) {
-      // Пока банк на экране, буквы можно брать только из него
-      const tile = exercise.letters.findIndex(
-        (letter, index) => letter === char && !usedTiles.has(index),
-      )
-      if (tile === -1) {
-        // Буквы нет в банке — показываем, что нажатие дошло, но не подходит
-        setRejected((tick) => tick + 1)
-        return
-      }
-      place(char, tile)
+    if (!bankVisible) {
+      place(char, null)
       return
     }
-    place(char, null)
+    // Пока банк на экране, буквы можно брать только из него
+    const tile = exercise.letters.findIndex(
+      (letter, index) => letter === char && !usedTiles.has(index),
+    )
+    if (tile === -1) {
+      // Буквы нет в банке — показываем, что нажатие дошло, но не подходит
+      setRejected((tick) => tick + 1)
+      return
+    }
+    place(char, tile)
   }
 
   useEffect(() => {
@@ -110,8 +130,14 @@ export function LettersCard({
   const filled = slots.every((slot) => slot.char !== null)
   useEffect(() => {
     if (!filled || locked) return
-    onAnswer({ answer: assemble(exercise.mask, slots), usedHint })
-  }, [filled, locked, exercise.mask, slots, usedHint, onAnswer])
+    onAnswer({
+      answer: assemble(exercise.mask, slots),
+      usedHint,
+      // Неверную букву поставить нельзя, поэтому промахи — единственный след
+      // того, что слово далось тяжело. Считаем их как вторую попытку.
+      attempt: mistakes > 0 ? 2 : 1,
+    })
+  }, [filled, locked, exercise.mask, slots, usedHint, mistakes, onAnswer])
 
   const hotkeys: HotkeyMap = {
     Backspace: (event) => {
@@ -132,7 +158,7 @@ export function LettersCard({
   useHotkeys(hotkeys, !locked)
 
   // Куда попадёт следующая набранная буква
-  const activeMaskIndex = slots.find((slot) => slot.char === null)?.maskIndex ?? -1
+  const activeMaskIndex = positions[cursor.current] ?? -1
 
   return (
     <div className="flex w-full max-w-3xl flex-col items-center gap-8">
@@ -149,7 +175,7 @@ export function LettersCard({
               key={index}
               type="button"
               disabled={locked}
-              onClick={() => clearSlot(index)}
+              onClick={() => clearFrom(positions.indexOf(index))}
               className={`flex size-14 items-center justify-center bg-white text-2xl font-semibold text-ink ${
                 index === activeMaskIndex ? 'ring-2 ring-accent' : ''
               }`}
@@ -183,8 +209,9 @@ export function LettersCard({
       )}
 
       <p className="text-center text-sm text-muted">
-        Вы можете выбирать буквы мышью или вводить их с клавиатуры —
-        раскладка не важна. Нажмите на букву в слове, чтобы стереть её
+        Вы можете выбирать буквы мышью или вводить их с клавиатуры — раскладка не
+        важна. Буква не на своё место не встанет. Нажмите на букву в слове, чтобы
+        стереть её и всё после неё
       </p>
 
       <div className="flex gap-3 text-accent">

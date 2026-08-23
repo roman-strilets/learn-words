@@ -63,6 +63,8 @@ export interface LettersExercise {
   prompt: string
   /** `_` — ячейка под букву, любой другой символ — фиксированный разделитель */
   mask: string
+  /** Само слово: карточка не даёт поставить букву не на своё место */
+  solution: string
   letters: string[]
   show_letters: boolean
   hint: string | null

@@ -36,6 +36,26 @@ def test_normalize_answer(raw, expected):
     assert normalize_answer(raw) == expected
 
 
+def test_solution_lines_up_with_mask(db_session: Session, words: list[Word]):
+    """Карточка сверяет ввод по `solution[i]` для ячейки `mask[i]` —
+    строки обязаны совпадать по длине и по расположению разделителей."""
+    rng = random.Random(0)
+    for word in words:
+        exercise = build_exercise(db_session, word, ExerciseType.LETTERS, rng=rng)
+        assert exercise.solution == word.word
+        assert len(exercise.mask) == len(exercise.solution)
+        for cell, char in zip(exercise.mask, exercise.solution, strict=True):
+            # Ячейка под букву — там, где в слове буква или цифра, и только там
+            assert (cell == "_") == char.isalnum()
+
+        # Банк покрывает каждую ячейку: собрать слово целиком возможно
+        bank = sorted(exercise.letters)
+        needed = sorted(c.upper() for c in exercise.solution if c.isalnum())
+        for letter in needed:
+            assert letter in bank
+            bank.remove(letter)
+
+
 def test_mask_keeps_separators():
     # Как на скриншоте: две ячейки, пробел, пять ячеек
     assert build_mask("go after") == "__ _____"

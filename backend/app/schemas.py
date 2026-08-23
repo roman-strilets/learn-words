@@ -112,12 +112,18 @@ class ChoiceEnRuExercise(BaseModel):
 
 class LettersExercise(BaseModel):
     """Собрать английское слово из букв. `mask` описывает раскладку ячеек:
-    `_` — ячейка под букву, любой другой символ — фиксированный разделитель."""
+    `_` — ячейка под букву, любой другой символ — фиксированный разделитель.
+
+    `solution` — само слово: карточка не даёт поставить букву не на своё место,
+    а для этого ей нужно знать ответ. Проверку это не подменяет — ответ всё
+    равно проверяется на сервере, и «Показать ответ» по-прежнему засчитывается
+    как ошибка. Диктант шлёт слово в браузер так же, ему нужна озвучка."""
 
     type: Literal[ExerciseType.LETTERS] = ExerciseType.LETTERS
     word_id: int
     prompt: str
     mask: str
+    solution: str
     letters: list[str]
     show_letters: bool = True
     hint: str | None = None
