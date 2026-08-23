@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import type { DictationExercise } from '../../api/types'
-import { useSpeech } from '../../speech/SpeechProvider'
+import { useSpeakOnce, useSpeech } from '../../speech/SpeechProvider'
 import { SpeakerIcon } from '../icons'
 import { Caption, HintButton } from '../ui'
 import type { ExerciseCardProps } from './types'
@@ -16,12 +16,14 @@ export function DictationCard({
   const [usedHint, setUsedHint] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
+  // Слово произносится всегда: услышать его — и есть задание
+  useSpeakOnce(exercise.audio_text)
+
   useEffect(() => {
     setValue('')
     setUsedHint(false)
     inputRef.current?.focus()
-    speak(exercise.audio_text)
-  }, [exercise.word_id, exercise.audio_text, speak])
+  }, [exercise.word_id])
 
   const submit = () => {
     if (locked) return

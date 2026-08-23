@@ -93,44 +93,32 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
     [voices, selectedUri],
   )
 
-  const timer = useRef<number | null>(null)
-
-  useEffect(() => {
-    return () => {
-      if (timer.current !== null) window.clearTimeout(timer.current)
-    }
-  }, [])
-
   /**
-   * Озвучить слово.
-   *
-   * Запрос откладывается на такт и склеивается с предыдущим: автопроигрывание
-   * висит на `useEffect`, а в StrictMode эффекты срабатывают дважды. Два
-   * `speak()` подряд означали `cancel()` ровно в тот момент, когда Chrome
-   * только заводил первую фразу, — очередь подвисала и слово молчало совсем.
+   * Озвучить слово. Вызов синхронный: браузер связывает речь с жестом
+   * пользователя, и перенос `speak()` в таймер способен её заблокировать.
    */
   const speak = useCallback(
     (text: string) => {
       const synth = window.speechSynthesis
       if (!synth || !text) return
 
-      if (timer.current !== null) window.clearTimeout(timer.current)
-      timer.current = window.setTimeout(() => {
-        timer.current = null
-        // Обрываем только то, что уже звучит: лишний cancel() и есть та самая
-        // гонка. Без него фразы копились бы в очереди и звучали с задержкой.
-        if (synth.speaking || synth.pending) synth.cancel()
+      // Обрываем только то, что реально звучит. Безусловный `cancel()` — тот
+      // самый известный баг Chrome: если он приходит, пока движок ещё заводит
+      // фразу, очередь остаётся в паузе и больше не произносится ничего.
+      if (synth.speaking || synth.pending) synth.cancel()
+      // Из этой паузы движок вытаскивает только resume(), даже если на неё
+      // никто не переводил осознанно.
+      if (synth.paused) synth.resume()
 
-        const utterance = new SpeechSynthesisUtterance(text)
-        if (selected) {
-          utterance.voice = selected.voice
-          utterance.lang = selected.lang
-        } else {
-          utterance.lang = 'en-US'
-        }
-        utterance.rate = rate
-        synth.speak(utterance)
-      }, 0)
+      const utterance = new SpeechSynthesisUtterance(text)
+      if (selected) {
+        utterance.voice = selected.voice
+        utterance.lang = selected.lang
+      } else {
+        utterance.lang = 'en-US'
+      }
+      utterance.rate = rate
+      synth.speak(utterance)
     },
     [selected, rate],
   )
@@ -157,4 +145,23 @@ export function useSpeech(): SpeechContextValue {
   const context = useContext(SpeechContext)
   if (!context) throw new Error('useSpeech должен вызываться внутри SpeechProvider')
   return context
+}
+
+/**
+ * Произнести текст один раз при появлении карточки.
+ *
+ * `speak()` обрывает предыдущую фразу, а эффекты в StrictMode вызываются
+ * дважды: без этой защиты второе срабатывание глушило первое и карточка
+ * молчала. Кнопка «произнести» идёт мимо хука — там повтор как раз нужен.
+ */
+export function useSpeakOnce(text: string, enabled = true): void {
+  const { speak } = useSpeech()
+  const spoken = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!enabled || !text) return
+    if (spoken.current === text) return
+    spoken.current = text
+    speak(text)
+  }, [text, enabled, speak])
 }

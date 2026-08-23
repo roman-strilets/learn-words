@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { useHotkeys } from '../../hooks/useHotkeys'
-import { useSpeech } from '../../speech/SpeechProvider'
+import { useSpeakOnce, useSpeech } from '../../speech/SpeechProvider'
 import { ChevronIcon } from '../icons'
 import { Button, Caption, HintButton, SpeakButton } from '../ui'
 
@@ -39,11 +39,11 @@ export function IntroCard({
   const { speak, autoplay, supported } = useSpeech()
   const [showExample, setShowExample] = useState(false)
 
+  useSpeakOnce(content.word, autoplay)
+
   useEffect(() => {
     setShowExample(false)
-    if (autoplay) speak(content.word)
-    // Озвучиваем при смене слова, а не на каждый ререндер
-  }, [content.wordId, content.word, autoplay, speak])
+  }, [content.wordId])
 
   useHotkeys(
     {

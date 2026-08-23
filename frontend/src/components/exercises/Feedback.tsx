@@ -1,7 +1,5 @@
-import { useEffect } from 'react'
-
 import { useHotkeys } from '../../hooks/useHotkeys'
-import { useSpeech } from '../../speech/SpeechProvider'
+import { useSpeakOnce, useSpeech } from '../../speech/SpeechProvider'
 import { Button, SpeakButton } from '../ui'
 
 interface Props {
@@ -25,17 +23,15 @@ export function Feedback({
 }: Props) {
   const { speak, autoplay, supported } = useSpeech()
 
+  // Верный ответ проговариваем: слово запоминается вместе со звучанием
+  useSpeakOnce(word, correct && autoplay)
+
   useHotkeys({
     Enter: (event) => {
       event.preventDefault()
       onContinue()
     },
   })
-
-  // Верный ответ проговариваем: слово запоминается вместе со звучанием
-  useEffect(() => {
-    if (correct && autoplay) speak(word)
-  }, [correct, word, autoplay, speak])
 
   return (
     <div
