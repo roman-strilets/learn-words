@@ -153,6 +153,30 @@ def test_review_mode_offers_only_due_words(client: TestClient, words: list[Word]
     assert body["counts"]["learning"] == 5
 
 
+def test_letters_exercise_keeps_the_bank_on_review(
+    client: TestClient, db_session: Session, words: list[Word]
+):
+    word_id = _first_new_word(client)["id"]
+    client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
+    progress = db_session.get(Progress, word_id)
+    progress.status = WordStatus.REVIEW
+    progress.repetitions = 3
+    progress.due_at = utcnow() - timedelta(days=1)
+    db_session.commit()
+
+    # Тип упражнения на повторении выбирается случайно — собираем за несколько заходов
+    letters = [
+        exercise
+        for _ in range(30)
+        for exercise in _session(client, "review")["exercises"]
+        if exercise["type"] == ExerciseType.LETTERS
+    ]
+
+    assert letters, "за 30 заходов не выпало ни одного упражнения с буквами"
+    assert all(e["show_letters"] for e in letters)
+    assert all(e["letters"] for e in letters)
+
+
 def test_review_mode_is_capped_at_five_words(client: TestClient, words: list[Word]):
     # Двенадцати слов в словаре хватает, чтобы взять в работу больше пяти
     for word in words[:7]:

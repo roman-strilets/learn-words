@@ -147,7 +147,9 @@ def build_session(
                     session,
                     word,
                     exercise_for(state, rng),
-                    show_letters=state.status == WordStatus.LEARNING,
+                    # Банк букв даём и на повторении: подсказка внизу карточки
+                    # обещает выбор мышью, а кто хочет сложнее — жмёт «Скрыть буквы»
+                    show_letters=True,
                     rng=rng,
                 )
             )

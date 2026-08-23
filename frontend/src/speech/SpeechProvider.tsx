@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react'
@@ -92,22 +93,44 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
     [voices, selectedUri],
   )
 
+  const timer = useRef<number | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (timer.current !== null) window.clearTimeout(timer.current)
+    }
+  }, [])
+
+  /**
+   * Озвучить слово.
+   *
+   * Запрос откладывается на такт и склеивается с предыдущим: автопроигрывание
+   * висит на `useEffect`, а в StrictMode эффекты срабатывают дважды. Два
+   * `speak()` подряд означали `cancel()` ровно в тот момент, когда Chrome
+   * только заводил первую фразу, — очередь подвисала и слово молчало совсем.
+   */
   const speak = useCallback(
     (text: string) => {
       const synth = window.speechSynthesis
       if (!synth || !text) return
 
-      // Без cancel() фразы копятся в очереди и произносятся с задержкой.
-      synth.cancel()
-      const utterance = new SpeechSynthesisUtterance(text)
-      if (selected) {
-        utterance.voice = selected.voice
-        utterance.lang = selected.lang
-      } else {
-        utterance.lang = 'en-US'
-      }
-      utterance.rate = rate
-      synth.speak(utterance)
+      if (timer.current !== null) window.clearTimeout(timer.current)
+      timer.current = window.setTimeout(() => {
+        timer.current = null
+        // Обрываем только то, что уже звучит: лишний cancel() и есть та самая
+        // гонка. Без него фразы копились бы в очереди и звучали с задержкой.
+        if (synth.speaking || synth.pending) synth.cancel()
+
+        const utterance = new SpeechSynthesisUtterance(text)
+        if (selected) {
+          utterance.voice = selected.voice
+          utterance.lang = selected.lang
+        } else {
+          utterance.lang = 'en-US'
+        }
+        utterance.rate = rate
+        synth.speak(utterance)
+      }, 0)
     },
     [selected, rate],
   )
