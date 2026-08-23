@@ -50,6 +50,23 @@ const SpeechContext = createContext<SpeechContextValue | null>(null)
 
 const MAX_VOICES = 9
 
+function buildUtterance(
+  text: string,
+  voice: SpeechSynthesisVoice | null,
+  rate: number,
+): SpeechSynthesisUtterance {
+  const utterance = new SpeechSynthesisUtterance(text)
+  if (voice) {
+    utterance.voice = voice
+    utterance.lang = voice.lang
+  } else {
+    // Без явного голоса браузер сам подберёт системный для этого языка
+    utterance.lang = 'en-US'
+  }
+  utterance.rate = rate
+  return utterance
+}
+
 export function SpeechProvider({ children }: { children: ReactNode }) {
   const [voices, setVoices] = useState<VoiceOption[]>([])
   const [selectedUri, setSelectedUri] = useLocalStorage<string | null>(
@@ -88,10 +105,21 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
     return () => synth.removeEventListener('voiceschanged', load)
   }, [])
 
-  const selected = useMemo(
-    () => voices.find((voice) => voice.uri === selectedUri) ?? voices[0] ?? null,
+  /**
+   * Голос, выбранный пользователем осознанно.
+   *
+   * Без выбора голос не навязываем: `getVoices()[0]` вполне может оказаться
+   * неработающим — сетевые голоса Google молчат без доступа к сети, системные
+   * голоса macOS — пока не скачаны. Навязав такой, приложение теряет звук
+   * целиком, хотя браузер сам по `lang` подобрал бы рабочий.
+   */
+  const chosen = useMemo(
+    () => voices.find((voice) => voice.uri === selectedUri) ?? null,
     [voices, selectedUri],
   )
+
+  // Для списка голосов: какой показывать активным, пока выбора не было
+  const selected = useMemo(() => chosen ?? voices[0] ?? null, [chosen, voices])
 
   /**
    * Озвучить слово. Вызов синхронный: браузер связывает речь с жестом
@@ -110,17 +138,21 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
       // никто не переводил осознанно.
       if (synth.paused) synth.resume()
 
-      const utterance = new SpeechSynthesisUtterance(text)
-      if (selected) {
-        utterance.voice = selected.voice
-        utterance.lang = selected.lang
-      } else {
-        utterance.lang = 'en-US'
+      const voice = chosen?.voice ?? null
+      const utterance = buildUtterance(text, voice, rate)
+      utterance.onerror = (event) => {
+        // Собственный cancel() тоже приходит сюда — это не отказ
+        if (event.error === 'canceled' || event.error === 'interrupted') return
+        // Молчание без объяснений — худший исход: называем причину вслух
+        console.error(
+          `Озвучка не удалась (${event.error}), голос: ${voice?.name ?? 'системный'}`,
+        )
+        // Отказать мог именно выбранный голос — пробуем системный
+        if (voice) synth.speak(buildUtterance(text, null, rate))
       }
-      utterance.rate = rate
       synth.speak(utterance)
     },
-    [selected, rate],
+    [chosen, rate],
   )
 
   const value = useMemo<SpeechContextValue>(

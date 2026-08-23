@@ -1,8 +1,6 @@
-import { useEffect } from 'react'
-
 import type { ChoiceExercise } from '../../api/types'
 import { isTypingTarget, useHotkeys } from '../../hooks/useHotkeys'
-import { useSpeech } from '../../speech/SpeechProvider'
+import { useSpeakOnce, useSpeech } from '../../speech/SpeechProvider'
 import { Caption, Prompt, SpeakButton } from '../ui'
 import type { ExerciseCardProps } from './types'
 
@@ -14,9 +12,7 @@ export function ChoiceCard({
   const { speak, autoplay, supported } = useSpeech()
   const isEnToRu = exercise.type === 'choice_en_ru'
 
-  useEffect(() => {
-    if (isEnToRu && autoplay) speak(exercise.prompt)
-  }, [exercise.word_id, exercise.prompt, isEnToRu, autoplay, speak])
+  useSpeakOnce(exercise.prompt, isEnToRu && autoplay)
 
   // Подсказки здесь нет: варианты уже на экране, поэтому usedHint всегда false
   useHotkeys(
