@@ -80,6 +80,12 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
     const synth = window.speechSynthesis
     if (!synth) return
 
+    // Очередь синтеза переживает перезагрузку вкладки. Если прошлая фраза
+    // осталась в ней подвешенной, движок не начнёт ни одной следующей:
+    // speaking навсегда true, события start и error не приходят, звука нет.
+    // Разовый сброс на старте — единственный способ выйти из этого состояния.
+    synth.cancel()
+
     // Список голосов в Chrome приходит асинхронно: разовый getVoices()
     // на монтировании вернул бы пустой массив.
     const load = () => {
