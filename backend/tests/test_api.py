@@ -16,6 +16,16 @@ LEARNING_CHAIN = [
 ]
 
 
+def _session(client: TestClient, mode: str):
+    response = client.get("/api/study/session", params={"mode": mode})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _first_new_word(client: TestClient) -> dict:
+    return _session(client, "learn")["new_words"][0]
+
+
 def _answer(client: TestClient, word_id: int, exercise: str, answer: str, **extra):
     payload = {"word_id": word_id, "exercise": exercise, "answer": answer, **extra}
     response = client.post("/api/study/answer", json=payload)
@@ -28,7 +38,7 @@ def test_health(client: TestClient):
 
 
 def test_session_offers_new_words(client: TestClient, words: list[Word]):
-    body = client.get("/api/study/session").json()
+    body = _session(client, "learn")
 
     assert len(body["new_words"]) == 5  # new_words_per_session
     assert body["exercises"] == []
@@ -37,7 +47,7 @@ def test_session_offers_new_words(client: TestClient, words: list[Word]):
 
 
 def test_full_learning_cycle(client: TestClient, db_session: Session, words: list[Word]):
-    target = client.get("/api/study/session").json()["new_words"][0]
+    target = _first_new_word(client)
     word_id, spelling = target["id"], target["word"]
 
     # Экран знакомства: «Изучить» засчитывает карточку и выдаёт первое упражнение
@@ -73,7 +83,7 @@ def test_full_learning_cycle(client: TestClient, db_session: Session, words: lis
 
 
 def test_wrong_answer_steps_back_and_repeats(client: TestClient, words: list[Word]):
-    target = client.get("/api/study/session").json()["new_words"][0]
+    target = _first_new_word(client)
     word_id, spelling = target["id"], target["word"]
 
     client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
@@ -90,7 +100,7 @@ def test_wrong_answer_steps_back_and_repeats(client: TestClient, words: list[Wor
 
 
 def test_hint_lowers_quality(client: TestClient, words: list[Word]):
-    target = client.get("/api/study/session").json()["new_words"][0]
+    target = _first_new_word(client)
     word_id, spelling = target["id"], target["word"]
     client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
 
@@ -104,25 +114,101 @@ def test_hint_lowers_quality(client: TestClient, words: list[Word]):
 def test_already_known_word_leaves_rotation(
     client: TestClient, db_session: Session, words: list[Word]
 ):
-    target = client.get("/api/study/session").json()["new_words"][0]
+    target = _first_new_word(client)
     word_id = target["id"]
 
     body = client.post("/api/study/select", json={"word_id": word_id, "action": "know"}).json()
     assert body["progress"]["status"] == WordStatus.KNOWN
     assert body["next_exercise"] is None
 
-    offered = {w["id"] for w in client.get("/api/study/session").json()["new_words"]}
+    offered = {w["id"] for w in _session(client, "learn")["new_words"]}
     assert word_id not in offered
 
 
+def test_session_mode_is_required(client: TestClient, words: list[Word]):
+    assert client.get("/api/study/session").status_code == 422
+
+
+def test_learn_mode_offers_only_new_words(client: TestClient, words: list[Word]):
+    target = _first_new_word(client)
+    client.post("/api/study/select", json={"word_id": target["id"], "action": "learn"})
+
+    body = _session(client, "learn")
+
+    # Взятое в работу слово ушло в очередь повторения и в «учить» не попадает
+    assert body["exercises"] == []
+    assert target["id"] not in {w["id"] for w in body["new_words"]}
+    assert len(body["new_words"]) == 5
+
+
+def test_review_mode_offers_only_due_words(client: TestClient, words: list[Word]):
+    started = [w["id"] for w in _session(client, "learn")["new_words"]]
+    for word_id in started:
+        client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
+
+    body = _session(client, "review")
+
+    assert body["new_words"] == []
+    assert {e["word_id"] for e in body["exercises"]} == set(started)
+    assert body["counts"]["learning"] == 5
+
+
+def test_review_mode_is_capped_at_five_words(client: TestClient, words: list[Word]):
+    # Двенадцати слов в словаре хватает, чтобы взять в работу больше пяти
+    for word in words[:7]:
+        client.post("/api/study/select", json={"word_id": word.id, "action": "learn"})
+
+    body = _session(client, "review")
+
+    assert len({e["word_id"] for e in body["exercises"]}) == 5  # review_words_per_session
+    assert body["counts"]["in_study"] == 7
+
+
+def test_known_word_is_replaced_by_the_next_new_one(client: TestClient, words: list[Word]):
+    offered = _session(client, "learn")["new_words"]
+    shown = [w["id"] for w in offered]
+
+    body = client.post(
+        "/api/study/select",
+        json={"word_id": shown[0], "action": "know", "exclude_ids": shown},
+    ).json()
+
+    replacement = body["replacement"]
+    assert replacement is not None
+    assert replacement["id"] not in shown  # не повторяет уже показанные слова
+    assert replacement["id"] == words[len(shown)].id  # следующее по порядку словаря
+
+
+def test_learn_action_does_not_bring_a_replacement(client: TestClient, words: list[Word]):
+    shown = [w["id"] for w in _session(client, "learn")["new_words"]]
+
+    body = client.post(
+        "/api/study/select",
+        json={"word_id": shown[0], "action": "learn", "exclude_ids": shown},
+    ).json()
+
+    assert body["replacement"] is None
+
+
+def test_replacement_is_absent_when_dictionary_runs_out(client: TestClient, db_session: Session):
+    created = client.post("/api/words", json={"word": "quirk", "translation": "причуда"}).json()
+
+    body = client.post(
+        "/api/study/select",
+        json={"word_id": created["id"], "action": "know", "exclude_ids": [created["id"]]},
+    ).json()
+
+    assert body["replacement"] is None
+
+
 def test_session_rebuilds_after_reload(client: TestClient, words: list[Word]):
-    target = client.get("/api/study/session").json()["new_words"][0]
+    target = _first_new_word(client)
     word_id, spelling = target["id"], target["word"]
     client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
     _answer(client, word_id, ExerciseType.CHOICE_RU_EN, spelling)
 
     # Перезагрузка страницы = повторный запрос сессии; прогресс не теряется
-    body = client.get("/api/study/session").json()
+    body = _session(client, "review")
     pending = [e for e in body["exercises"] if e["word_id"] == word_id]
     assert len(pending) == 1
     assert pending[0]["type"] == ExerciseType.LETTERS
@@ -138,7 +224,7 @@ def test_answer_for_word_not_in_study_is_rejected(client: TestClient, words: lis
 
 
 def test_reset_returns_word_to_new(client: TestClient, words: list[Word]):
-    word_id = client.get("/api/study/session").json()["new_words"][0]["id"]
+    word_id = _first_new_word(client)["id"]
     client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
 
     assert client.post(f"/api/study/reset/{word_id}").status_code == 204
@@ -165,7 +251,7 @@ def test_new_word_is_offered_for_study(client: TestClient, db_session: Session):
         "/api/words", json={"word": "quirk", "translation": "причуда"}
     ).json()
 
-    offered = {w["id"] for w in client.get("/api/study/session").json()["new_words"]}
+    offered = {w["id"] for w in _session(client, "learn")["new_words"]}
     assert created["id"] in offered
 
 
@@ -183,7 +269,7 @@ def test_update_and_delete_word(client: TestClient, db_session: Session, words: 
 def test_deleting_word_removes_progress(
     client: TestClient, db_session: Session, words: list[Word]
 ):
-    word_id = client.get("/api/study/session").json()["new_words"][0]["id"]
+    word_id = _first_new_word(client)["id"]
     client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
 
     client.delete(f"/api/words/{word_id}")
@@ -203,7 +289,7 @@ def test_words_search_and_status_filter(client: TestClient, words: list[Word]):
     by_translation = client.get("/api/words", params={"search": "край"}).json()
     assert by_translation["total"] == 1
 
-    word_id = client.get("/api/study/session").json()["new_words"][0]["id"]
+    word_id = _first_new_word(client)["id"]
     client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
 
     learning = client.get("/api/words", params={"status": "learning"}).json()
@@ -218,7 +304,7 @@ def test_stats_overview_tracks_progress(client: TestClient, words: list[Word]):
     assert empty["new"] == len(words)
     assert empty["streak_days"] == 0
 
-    word_id = client.get("/api/study/session").json()["new_words"][0]["id"]
+    word_id = _first_new_word(client)["id"]
     client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
 
     after = client.get("/api/stats/overview").json()
@@ -231,7 +317,7 @@ def test_stats_overview_tracks_progress(client: TestClient, words: list[Word]):
 
 
 def test_stats_daily_covers_requested_window(client: TestClient, words: list[Word]):
-    word_id = client.get("/api/study/session").json()["new_words"][0]["id"]
+    word_id = _first_new_word(client)["id"]
     client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
 
     daily = client.get("/api/stats/daily", params={"days": 7}).json()

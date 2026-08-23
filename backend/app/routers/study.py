@@ -11,6 +11,7 @@ from app.schemas import (
     AnswerResponse,
     SelectRequest,
     SelectResponse,
+    SessionMode,
     SessionOut,
     WordOut,
 )
@@ -27,9 +28,12 @@ router = APIRouter(prefix="/study", tags=["study"])
 
 
 @router.get("/session", response_model=SessionOut)
-def get_session_queue(session: Session = Depends(get_session)) -> SessionOut:
-    """Новые слова на знакомство + очередь упражнений по словам, готовым к показу."""
-    return build_session(session, utcnow())
+def get_session_queue(
+    mode: SessionMode = Query(description="learn — новые слова, review — слова к повторению"),
+    session: Session = Depends(get_session),
+) -> SessionOut:
+    """Набор занятия: новые слова на знакомство либо очередь упражнений."""
+    return build_session(session, utcnow(), mode)
 
 
 @router.get("/new", response_model=list[WordOut])
@@ -46,7 +50,7 @@ def select(payload: SelectRequest, session: Session = Depends(get_session)) -> S
     word = session.get(Word, payload.word_id)
     if word is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Слово не найдено")
-    return select_word(session, word, payload.action, utcnow())
+    return select_word(session, word, payload.action, utcnow(), payload.exclude_ids)
 
 
 @router.post("/answer", response_model=AnswerResponse)

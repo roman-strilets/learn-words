@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
@@ -18,6 +19,7 @@ from app.schemas import (
     ProgressOut,
     SelectResponse,
     SessionCounts,
+    SessionMode,
     SessionOut,
     WordOut,
 )
@@ -59,15 +61,17 @@ def write_state(progress: Progress, state: SrsState, now: datetime) -> None:
 # ------------------------------------------------------------------------ запросы
 
 
-def new_words_query(limit: int):
+def new_words_query(limit: int, exclude_ids: Sequence[int] = ()):
     """Слова, которых ещё нет в изучении, в порядке появления в словаре."""
-    return (
+    stmt = (
         select(Word)
         .outerjoin(Progress, Progress.word_id == Word.id)
         .where(Progress.word_id.is_(None))
         .order_by(Word.id)
-        .limit(limit)
     )
+    if exclude_ids:
+        stmt = stmt.where(Word.id.notin_(exclude_ids))
+    return stmt.limit(limit)
 
 
 def _started_today(session: Session, now: datetime) -> int:
@@ -85,18 +89,25 @@ def new_words_allowance(session: Session, now: datetime, requested: int) -> int:
     return max(0, min(requested, remaining))
 
 
-def fetch_new_words(session: Session, now: datetime, limit: int) -> list[Word]:
+def fetch_new_words(
+    session: Session, now: datetime, limit: int, exclude_ids: Sequence[int] = ()
+) -> list[Word]:
     allowance = new_words_allowance(session, now, limit)
     if allowance == 0:
         return []
-    return list(session.scalars(new_words_query(allowance)))
+    return list(session.scalars(new_words_query(allowance, exclude_ids)))
 
 
-def _due_words(session: Session, now: datetime, status: WordStatus, limit: int) -> list[Word]:
+def _due_words(session: Session, now: datetime, limit: int) -> list[Word]:
+    """Слова в обороте, у которых подошёл срок: самые просроченные первыми.
+
+    Learning и review берутся одним запросом — на повторении важен срок,
+    а не то, на каком этапе слово находится.
+    """
     stmt = (
         select(Word)
         .join(Progress, Progress.word_id == Word.id)
-        .where(Progress.status == status.value, Progress.due_at <= now)
+        .where(Progress.status.in_(ACTIVE_STATUSES), Progress.due_at <= now)
         .order_by(Progress.due_at)
         .limit(limit)
     )
@@ -106,33 +117,43 @@ def _due_words(session: Session, now: datetime, status: WordStatus, limit: int) 
 # ------------------------------------------------------------------------ сессия
 
 
-def build_session(session: Session, now: datetime, rng: random.Random | None = None) -> SessionOut:
-    """Собрать стартовый набор сессии.
+def build_session(
+    session: Session,
+    now: datetime,
+    mode: SessionMode,
+    rng: random.Random | None = None,
+) -> SessionOut:
+    """Собрать стартовый набор занятия — 5 слов выбранной категории.
 
-    Очередь дальше живёт на фронте: бэкенд остаётся stateless, поэтому
-    перезагрузка страницы просто пересобирает сессию из актуального прогресса.
+    `learn` даёт новые слова на знакомство, `review` — очередь упражнений по
+    словам, у которых подошёл срок. Очередь дальше живёт на фронте: бэкенд
+    остаётся stateless, поэтому перезагрузка страницы просто пересобирает
+    занятие из актуального прогресса.
     """
     rng = rng or random.Random()
 
-    reviews = _due_words(session, now, WordStatus.REVIEW, settings.session_size)
-    learning = _due_words(session, now, WordStatus.LEARNING, settings.session_size)
-
+    new_words: list[Word] = []
+    due: list[Word] = []
     queue: list[Exercise] = []
-    for word in reviews + learning:
-        state = state_from_progress(word.progress)
-        exercise_type = exercise_for(state, rng)
-        queue.append(
-            build_exercise(
-                session,
-                word,
-                exercise_type,
-                show_letters=state.status == WordStatus.LEARNING,
-                rng=rng,
-            )
-        )
-    rng.shuffle(queue)
 
-    new_words = fetch_new_words(session, now, settings.new_words_per_session)
+    if mode is SessionMode.LEARN:
+        new_words = fetch_new_words(session, now, settings.new_words_per_session)
+    else:
+        due = _due_words(session, now, settings.review_words_per_session)
+        for word in due:
+            state = state_from_progress(word.progress)
+            queue.append(
+                build_exercise(
+                    session,
+                    word,
+                    exercise_for(state, rng),
+                    show_letters=state.status == WordStatus.LEARNING,
+                    rng=rng,
+                )
+            )
+        rng.shuffle(queue)
+
+    learning = sum(1 for w in due if w.progress.status == WordStatus.LEARNING.value)
 
     in_study = (
         session.scalar(
@@ -142,12 +163,13 @@ def build_session(session: Session, now: datetime, rng: random.Random | None = N
     )
 
     return SessionOut(
+        mode=mode,
         new_words=[WordOut.model_validate(w) for w in new_words],
         exercises=queue,
         counts=SessionCounts(
             new=len(new_words),
-            learning=len(learning),
-            review_due=len(reviews),
+            learning=learning,
+            review_due=len(due) - learning,
             in_study=in_study,
         ),
     )
@@ -199,7 +221,12 @@ def _next_exercise(
 
 
 def select_word(
-    session: Session, word: Word, action: str, now: datetime, rng: random.Random | None = None
+    session: Session,
+    word: Word,
+    action: str,
+    now: datetime,
+    exclude_ids: Sequence[int] = (),
+    rng: random.Random | None = None,
 ) -> SelectResponse:
     """Обработать экран знакомства: «Уже знаю» или «Изучить»."""
     rng = rng or random.Random()
@@ -239,9 +266,17 @@ def select_word(
     )
     session.flush()
 
+    # «Уже знаю» выводит слово из оборота — добираем взамен следующее новое,
+    # чтобы в занятии осталось столько же слов на изучение, сколько было.
+    # Запрос идёт после flush: помеченное слово уже отсеется по своему прогрессу.
+    replacement = None
+    if action == "know":
+        replacement = next(iter(fetch_new_words(session, now, 1, exclude_ids)), None)
+
     return SelectResponse(
         progress=ProgressOut.model_validate(progress),
         next_exercise=_next_exercise(session, word, state, now, rng),
+        replacement=WordOut.model_validate(replacement) if replacement else None,
     )
 
 

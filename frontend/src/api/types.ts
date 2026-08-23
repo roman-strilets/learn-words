@@ -7,6 +7,9 @@ export type ExerciseType =
 
 export type WordStatus = 'learning' | 'review' | 'known' | 'suspended'
 
+/** Что делаем на занятии: знакомимся с новыми словами или повторяем изученные. */
+export type StudyMode = 'learn' | 'review'
+
 export interface Word {
   id: number
   word: string
@@ -86,7 +89,10 @@ export interface SessionCounts {
 }
 
 export interface SessionPayload {
+  mode: StudyMode
+  /** Заполнено в режиме `learn` */
   new_words: Word[]
+  /** Заполнено в режиме `review` */
   exercises: Exercise[]
   counts: SessionCounts
 }
@@ -94,6 +100,8 @@ export interface SessionPayload {
 export interface SelectResponse {
   progress: Progress
   next_exercise: Exercise | null
+  /** Замена слову, помеченному «уже знаю», чтобы занятие не стало короче */
+  replacement: Word | null
 }
 
 export interface AnswerPayload {

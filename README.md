@@ -62,6 +62,19 @@ WEB_PORT=5173       # фронтенд, туда же смотрит прокс�
 
 ## Как устроено обучение
 
+### Два вида занятия
+
+С главной запускаются два занятия, каждое — на 5 слов своей категории:
+
+| Кнопка | Что берёт | Чем заканчивается |
+|---|---|---|
+| **Учить слова** | 5 новых слов, которых ещё нет в изучении | Слова проходят шаги знакомства |
+| **Повторить слова** | 5 слов в обороте с подошедшим сроком, самые просроченные первыми | Ответы двигают расписание по SM-2 |
+
+Кнопка «Уже знаю» на карточке знакомства выводит слово из оборота и добирает
+взамен следующее новое: занятие всё равно даёт 5 слов на изучение. Замена не
+повторяет уже показанные слова — фронт присылает их список в `exclude_ids`.
+
 ### Знакомство (learning steps)
 
 Новое слово проходит четыре шага внутри одной сессии, сложность растёт:
@@ -136,9 +149,10 @@ POST   /api/words                     добавить слово вручную
 PATCH  /api/words/{id}
 DELETE /api/words/{id}
 
-GET    /api/study/session             новые слова + очередь упражнений
+GET    /api/study/session?mode=learn  5 новых слов на знакомство
+GET    /api/study/session?mode=review 5 слов к повторению + очередь упражнений
 GET    /api/study/new?limit=5
-POST   /api/study/select              {word_id, action: "learn" | "know"}
+POST   /api/study/select              {word_id, action: "learn" | "know", exclude_ids}
 POST   /api/study/answer              {word_id, exercise, answer, used_hint, attempt}
 POST   /api/study/reset/{word_id}
 
@@ -160,14 +174,14 @@ GET    /api/stats/daily?days=30
 
 | Параметр | По умолчанию | Смысл |
 |---|---|---|
-| `NEW_WORDS_PER_SESSION` | 5 | Сколько новых слов предлагать в начале сессии |
-| `SESSION_SIZE` | 20 | Максимум карточек в сессии |
+| `NEW_WORDS_PER_SESSION` | 5 | Сколько новых слов даёт занятие «Учить слова» |
+| `REVIEW_WORDS_PER_SESSION` | 5 | Сколько слов даёт занятие «Повторить слова» |
 | `DAILY_NEW_LIMIT` | 20 | Дневной лимит новых слов |
 
 ## Проверки
 
 ```bash
-yarn test:api      # pytest, 71 тест
+yarn test:api      # pytest, 78 тестов
 yarn typecheck     # tsc
 yarn build         # production-сборка фронта
 uv run --directory backend ruff check app tests

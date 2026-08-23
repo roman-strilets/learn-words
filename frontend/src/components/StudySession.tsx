@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 
 import { api } from '../api/client'
-import type { AnswerResponse, Exercise, SessionPayload } from '../api/types'
+import type { AnswerResponse, Exercise, SessionPayload, Word } from '../api/types'
 import { ChoiceCard } from './exercises/ChoiceCard'
 import { DictationCard } from './exercises/DictationCard'
 import { Feedback } from './exercises/Feedback'
@@ -27,6 +27,8 @@ interface Props {
 
 export function StudySession({ session, onFinished }: Props) {
   const [introIndex, setIntroIndex] = useState(0)
+  // Список знакомства пополняется на ходу: «Уже знаю» добирает слово взамен
+  const [introWords, setIntroWords] = useState<Word[]>(session.new_words)
   const [queue, setQueue] = useState<Exercise[]>(session.exercises)
   const [feedback, setFeedback] = useState<AnswerResponse | null>(null)
   const [tally, setTally] = useState({ answered: 0, correct: 0 })
@@ -39,7 +41,6 @@ export function StudySession({ session, onFinished }: Props) {
   const submitting = useRef(false)
   const startedAt = useRef(Date.now())
 
-  const introWords = session.new_words
   const introDone = introIndex >= introWords.length
   const current = introDone ? (queue[0] ?? null) : null
 
@@ -48,11 +49,21 @@ export function StudySession({ session, onFinished }: Props) {
   }, [current, introIndex])
 
   const selectMutation = useMutation({
-    mutationFn: ({ wordId, action }: { wordId: number; action: 'learn' | 'know' }) =>
-      api.select(wordId, action),
+    mutationFn: ({
+      wordId,
+      action,
+      excludeIds,
+    }: {
+      wordId: number
+      action: 'learn' | 'know'
+      excludeIds: number[]
+    }) => api.select(wordId, action, excludeIds),
     onSuccess: (data) => {
       // Упражнения новых слов идут в конец: сначала знакомимся со всеми
       if (data.next_exercise) setQueue((items) => [...items, data.next_exercise!])
+      // «Уже знаю» вывело слово из оборота — на его место встаёт следующее новое,
+      // чтобы в занятии осталось столько же слов на изучение
+      if (data.replacement) setIntroWords((words) => [...words, data.replacement!])
       setIntroIndex((index) => index + 1)
       submitting.current = false
     },
@@ -105,7 +116,12 @@ export function StudySession({ session, onFinished }: Props) {
       const word = introWords[introIndex]
       if (!word || submitting.current) return
       submitting.current = true
-      selectMutation.mutate({ wordId: word.id, action })
+      selectMutation.mutate({
+        wordId: word.id,
+        action,
+        // Показанные слова не должны вернуться заменой
+        excludeIds: introWords.map((item) => item.id),
+      })
     },
     [introWords, introIndex, selectMutation],
   )
@@ -119,6 +135,12 @@ export function StudySession({ session, onFinished }: Props) {
     () => introWords.length - introIndex + queue.length,
     [introWords.length, introIndex, queue.length],
   )
+
+  // Занятие — это N слов, взятых в изучение. Замена за «Уже знаю» удлиняет
+  // список знакомства, поэтому в счётчике карточка со знакомым словом не занимает
+  // места: считаем позицию по словам, оставшимся к изучению, а не по показам.
+  const introTotal = session.new_words.length
+  const introPosition = introIndex - (introWords.length - introTotal)
 
   const error = selectMutation.error ?? answerMutation.error
   const locked = Boolean(feedback) || submitting.current
@@ -141,8 +163,8 @@ export function StudySession({ session, onFinished }: Props) {
             example_translation: introWords[introIndex].example_translation,
           }}
           variant="select"
-          index={introIndex}
-          total={introWords.length}
+          index={introPosition}
+          total={introTotal}
           onLearn={() => handleSelect('learn')}
           onKnow={() => handleSelect('know')}
           locked={submitting.current}

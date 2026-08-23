@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -140,6 +141,13 @@ Exercise = Annotated[
 # ------------------------------------------------------------------------- сессия
 
 
+class SessionMode(StrEnum):
+    """Что делаем на занятии: знакомимся с новыми словами или повторяем изученные."""
+
+    LEARN = "learn"
+    REVIEW = "review"
+
+
 class SessionCounts(BaseModel):
     new: int
     learning: int
@@ -148,8 +156,10 @@ class SessionCounts(BaseModel):
 
 
 class SessionOut(BaseModel):
-    """Стартовый набор сессии: сначала знакомство с новыми словами, потом очередь."""
+    """Стартовый набор сессии. Заполнена ровно одна из категорий: в режиме
+    `learn` — новые слова на знакомство, в режиме `review` — очередь упражнений."""
 
+    mode: SessionMode
     new_words: list[WordOut]
     exercises: list[Exercise]
     counts: SessionCounts
@@ -158,11 +168,15 @@ class SessionOut(BaseModel):
 class SelectRequest(BaseModel):
     word_id: int
     action: Literal["learn", "know"]
+    # Слова, уже показанные в этом занятии: замена не должна их повторять
+    exclude_ids: list[int] = Field(default_factory=list)
 
 
 class SelectResponse(BaseModel):
     progress: ProgressOut
     next_exercise: Exercise | None = None
+    # Замена слову, помеченному «уже знаю», чтобы занятие осталось прежнего размера
+    replacement: WordOut | None = None
 
 
 class AnswerRequest(BaseModel):

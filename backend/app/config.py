@@ -15,9 +15,9 @@ class Settings(BaseSettings):
 
     database_url: str = f"sqlite:///{BACKEND_DIR / 'data' / 'app.db'}"
 
-    # Состав учебной сессии
+    # Состав учебной сессии: занятие — это 5 слов одной категории
     new_words_per_session: int = 5
-    session_size: int = 20
+    review_words_per_session: int = 5
     daily_new_limit: int = 20
 
     # Границы SM-2

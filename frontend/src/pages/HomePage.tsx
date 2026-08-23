@@ -1,8 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router'
 
 import { api } from '../api/client'
 import { plural } from '../lib/format'
+import { StudyModeLinks } from '../components/StudyModeLinks'
 import { ErrorBox, Spinner } from '../components/ui'
 
 function StatTile({ label, value }: { label: string; value: number }) {
@@ -24,16 +24,14 @@ export function HomePage() {
   if (error) return <ErrorBox message={(error as Error).message} />
   if (!data) return null
 
-  const ready = data.due_now + Math.min(data.new, 5)
+  const ready = data.new + data.due_now
 
   return (
     <div className="flex flex-col items-center gap-10">
       <header className="flex flex-col items-center gap-3">
         <h1 className="text-center text-5xl font-bold text-ink">Изучение слов</h1>
         <p className="text-lg text-muted">
-          {ready > 0
-            ? `Готово к занятию: ${ready} ${plural(ready, ['карточка', 'карточки', 'карточек'])}`
-            : 'На сегодня всё повторено'}
+          {ready > 0 ? 'Выберите, чем сегодня займёмся' : 'На сегодня всё повторено'}
         </p>
       </header>
 
@@ -44,12 +42,12 @@ export function HomePage() {
         <StatTile label="Знаю" value={data.known} />
       </div>
 
-      <Link
-        to="/study"
-        className="rounded-md bg-accent px-12 py-4 text-xl font-semibold text-white transition-colors hover:bg-accent-hover"
-      >
-        Начать занятие
-      </Link>
+      <StudyModeLinks
+        hints={{
+          learn: `${data.new} ${plural(data.new, ['новое слово', 'новых слова', 'новых слов'])}`,
+          review: `${data.due_now} ${plural(data.due_now, ['слово готово', 'слова готовы', 'слов готово'])}`,
+        }}
+      />
 
       <dl className="flex flex-wrap justify-center gap-x-8 gap-y-2 text-sm text-muted">
         <div className="flex gap-2">

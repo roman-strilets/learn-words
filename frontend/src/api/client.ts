@@ -5,6 +5,7 @@ import type {
   SelectResponse,
   SessionPayload,
   StatsOverview,
+  StudyMode,
   WordInput,
   WordPage,
   WordWithProgress,
@@ -45,12 +46,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  getSession: () => request<SessionPayload>('/study/session'),
+  getSession: (mode: StudyMode) =>
+    request<SessionPayload>(`/study/session?mode=${mode}`),
 
-  select: (wordId: number, action: 'learn' | 'know') =>
+  select: (wordId: number, action: 'learn' | 'know', excludeIds: number[] = []) =>
     request<SelectResponse>('/study/select', {
       method: 'POST',
-      body: JSON.stringify({ word_id: wordId, action }),
+      body: JSON.stringify({ word_id: wordId, action, exclude_ids: excludeIds }),
     }),
 
   answer: (payload: AnswerPayload) =>
