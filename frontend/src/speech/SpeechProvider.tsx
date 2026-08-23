@@ -106,6 +106,34 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
   }, [])
 
   /**
+   * Снять запрет на озвучку.
+   *
+   * Chrome отвечает `not-allowed`, пока в документе не было жеста
+   * пользователя, — под запрет попадает и озвучка первой карточки, которая
+   * заводится из эффекта. Беззвучная фраза на первом же клике или нажатии
+   * клавиши ничего не произносит, но помечает движок разрешённым.
+   */
+  useEffect(() => {
+    const synth = window.speechSynthesis
+    if (!synth) return
+
+    const unlock = () => {
+      const primer = new SpeechSynthesisUtterance(' ')
+      primer.volume = 0
+      synth.speak(primer)
+      stop()
+    }
+    const stop = () => {
+      window.removeEventListener('pointerdown', unlock)
+      window.removeEventListener('keydown', unlock)
+    }
+
+    window.addEventListener('pointerdown', unlock)
+    window.addEventListener('keydown', unlock)
+    return stop
+  }, [])
+
+  /**
    * Голос, выбранный пользователем осознанно.
    *
    * Без выбора голос не навязываем: `getVoices()[0]` вполне может оказаться
@@ -143,7 +171,15 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
       utterance.onerror = (event) => {
         // Собственный cancel() тоже приходит сюда — это не отказ
         if (event.error === 'canceled' || event.error === 'interrupted') return
+
         // Молчание без объяснений — худший исход: называем причину вслух
+        if (event.error === 'not-allowed') {
+          console.error(
+            'Озвучку запретил браузер (not-allowed). Проверьте, что вкладка не ' +
+              'заглушена, а в настройках сайта разрешён звук.',
+          )
+          return
+        }
         console.error(
           `Озвучка не удалась (${event.error}), голос: ${voice?.name ?? 'системный'}`,
         )
