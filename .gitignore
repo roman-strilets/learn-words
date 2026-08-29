@@ -19,3 +19,6 @@ frontend/dist/
 # Прочее
 .DS_Store
 .env
+
+.claude/
+.specify/
