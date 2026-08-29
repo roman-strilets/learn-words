@@ -2,6 +2,7 @@ import type {
   AnswerPayload,
   AnswerResponse,
   DailyStat,
+  ReviewFinishResult,
   SelectResponse,
   SessionPayload,
   StatsOverview,
@@ -60,6 +61,14 @@ export const api = {
     request<AnswerResponse>('/study/answer', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }),
+
+  // Конец занятия-повторения: сервер сам разбирает журнал занятия и один раз
+  // пересчитывает расписание каждого слова, прошедшего все четыре раунда
+  finishReview: (sessionId: string) =>
+    request<ReviewFinishResult[]>('/study/review/finish', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sessionId }),
     }),
 
   listWords: (params: {

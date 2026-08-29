@@ -4,6 +4,7 @@ import { Link, useSearchParams } from 'react-router'
 
 import { api } from '../api/client'
 import type { StudyMode } from '../api/types'
+import { ReviewSession } from '../components/ReviewSession'
 import { StudySession } from '../components/StudySession'
 import { MODE_LABEL, StudyModeLinks, studyPath } from '../components/StudyModeLinks'
 import { plural } from '../lib/format'
@@ -104,7 +105,7 @@ export function StudyPage() {
     )
   }
 
-  const empty = data.new_words.length === 0 && data.exercises.length === 0
+  const empty = data.new_words.length === 0 && data.rounds.length === 0
   if (empty) {
     const other: StudyMode = mode === 'learn' ? 'review' : 'learn'
     return (
@@ -126,6 +127,12 @@ export function StudyPage() {
     )
   }
 
+  // У режимов разные правила очереди: «Изучение» ведёт список знакомства,
+  // «Повторение» — раунды по типам упражнений.
   // key: при смене режима очередь и счётчики должны собраться заново
-  return <StudySession key={mode} session={data} onFinished={handleFinished} />
+  return mode === 'review' ? (
+    <ReviewSession key={mode} session={data} onFinished={handleFinished} />
+  ) : (
+    <StudySession key={mode} session={data} onFinished={handleFinished} />
+  )
 }

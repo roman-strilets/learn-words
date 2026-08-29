@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import random
+import uuid
+from collections import defaultdict
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Literal
@@ -18,6 +20,8 @@ from app.schemas import (
     AnswerResponse,
     Exercise,
     ProgressOut,
+    ReviewFinishResult,
+    ReviewRound,
     SelectResponse,
     SessionCounts,
     SessionMode,
@@ -25,12 +29,15 @@ from app.schemas import (
     WordOut,
 )
 from app.srs import (
+    REVIEW_ROUNDS,
+    AttemptOutcome,
     SrsState,
     apply_answer,
     derive_quality,
     exercise_for,
     force_status,
     mark_known,
+    session_quality,
     start_learning,
 )
 
@@ -143,26 +150,35 @@ def build_session(
 
     new_words: list[Word] = []
     due: list[Word] = []
-    queue: list[Exercise] = []
+    rounds: list[ReviewRound] = []
+    session_id: str | None = None
 
     if mode is SessionMode.LEARN:
         new_words = fetch_new_words(session, now, settings.new_words_per_session)
     else:
         due = _due_words(session, now, settings.review_words_per_session)
-        for word in due:
-            state = state_from_progress(word.progress)
-            queue.append(
-                build_exercise(
-                    session,
-                    word,
-                    exercise_for(state, rng),
-                    # Банк букв даём и на повторении: подсказка внизу карточки
-                    # обещает выбор мышью, а кто хочет сложнее — жмёт «Скрыть буквы»
-                    show_letters=True,
-                    rng=rng,
-                )
+        if due:
+            # Ключ занятия нужен только там, где есть что повторять: по нему
+            # `finish` соберёт попытки занятия и выведет итог по каждому слову.
+            session_id = str(uuid.uuid4())
+        rounds = [
+            ReviewRound(
+                exercise=exercise_type,
+                exercises=[
+                    build_exercise(
+                        session,
+                        word,
+                        exercise_type,
+                        # Банк букв даём и на повторении: подсказка внизу карточки
+                        # обещает выбор мышью, а кто хочет сложнее — жмёт «Скрыть буквы»
+                        show_letters=True,
+                        rng=rng,
+                    )
+                    for word in due
+                ],
             )
-        rng.shuffle(queue)
+            for exercise_type in REVIEW_ROUNDS
+        ] if due else []
 
     learning = sum(1 for w in due if w.progress.status == WordStatus.LEARNING.value)
 
@@ -175,8 +191,9 @@ def build_session(
 
     return SessionOut(
         mode=mode,
+        session_id=session_id,
         new_words=[WordOut.model_validate(w) for w in new_words],
-        exercises=queue,
+        rounds=rounds,
         counts=SessionCounts(
             new=len(new_words),
             learning=learning,
@@ -200,6 +217,7 @@ def _log(
     before: SrsState,
     after: SrsState,
     now: datetime,
+    session_id: str | None = None,
 ) -> None:
     session.add(
         ReviewLog(
@@ -216,6 +234,7 @@ def _log(
             ease_after=after.ease,
             interval_after=after.interval_days,
             created_at=now,
+            session_id=session_id,
         )
     )
 
@@ -228,7 +247,7 @@ def _next_exercise(
         return None
     if state.due_at is not None and state.due_at > now:
         return None
-    return build_exercise(session, word, exercise_for(state, rng), show_letters=True, rng=rng)
+    return build_exercise(session, word, exercise_for(state), show_letters=True, rng=rng)
 
 
 def select_word(
@@ -298,6 +317,12 @@ def answer_exercise(
     now: datetime,
     rng: random.Random | None = None,
 ) -> AnswerResponse:
+    """Проверить ответ и решить, что показывать дальше.
+
+    Режимы расходятся в одном: «Изучение» двигает расписание сразу, а занятие
+    -повторение только пишет попытку в журнал — слово получит четыре упражнения
+    за занятие, и одно обновление на все четыре ставится в `finish`.
+    """
     rng = rng or random.Random()
     if word.progress is None:
         raise WordNotInStudyError
@@ -305,9 +330,31 @@ def answer_exercise(
     before = state_from_progress(word.progress)
     correct = check_answer(word, request.exercise, request.answer)
     quality = derive_quality(correct=correct, used_hint=request.used_hint, attempt=request.attempt)
-    after = apply_answer(before, quality=quality, now=now, rng=rng)
 
-    write_state(word.progress, after, now)
+    if request.mode is SessionMode.REVIEW:
+        # Статус до и после совпадает: расписание внутри занятия не трогаем
+        after = before
+        repeat = not correct
+        # Повтор после ошибки — тот же тип, но карточка собирается заново:
+        # запомненная позиция кнопки не должна подменять знание слова
+        next_exercise = (
+            build_exercise(
+                session,
+                word,
+                request.exercise,
+                show_letters=True,
+                attempt=request.attempt + 1,
+                rng=rng,
+            )
+            if repeat
+            else None
+        )
+    else:
+        after = apply_answer(before, quality=quality, now=now, rng=rng)
+        write_state(word.progress, after, now)
+        repeat = after.status == WordStatus.LEARNING
+        next_exercise = _next_exercise(session, word, after, now, rng)
+
     _log(
         session,
         word_id=word.id,
@@ -321,6 +368,7 @@ def answer_exercise(
         before=before,
         after=after,
         now=now,
+        session_id=request.session_id,
     )
     session.flush()
 
@@ -332,10 +380,72 @@ def answer_exercise(
         example=word.example,
         example_translation=word.example_translation,
         quality=quality,
-        repeat_in_session=after.status == WordStatus.LEARNING,
-        next_exercise=_next_exercise(session, word, after, now, rng),
+        repeat_in_session=repeat,
+        next_exercise=next_exercise,
         progress=ProgressOut.model_validate(word.progress),
     )
+
+
+def finish_review_session(
+    session: Session,
+    session_id: str,
+    now: datetime,
+    rng: random.Random | None = None,
+) -> list[ReviewFinishResult]:
+    """Подвести итог занятия-повторения и один раз пересчитать расписание.
+
+    Оценку выводит сервер, а не клиент: попытки занятия лежат в `review_log`
+    под своим `session_id`, и по ним видно и то, прошло ли слово все четыре
+    раунда, и была ли по нему ошибка.
+    """
+    rng = rng or random.Random()
+
+    attempts: dict[int, list[ReviewLog]] = defaultdict(list)
+    logs = session.scalars(
+        select(ReviewLog)
+        .where(ReviewLog.session_id == session_id)
+        .order_by(ReviewLog.created_at)
+    )
+    for log in logs:
+        attempts[log.word_id].append(log)
+
+    results: list[ReviewFinishResult] = []
+    for word_id, word_attempts in attempts.items():
+        answered = {log.exercise for log in word_attempts if log.correct}
+        # FR-017a: слово, не дошедшее до конца раундов, не трогаем вовсе
+        if not set(REVIEW_ROUNDS) <= answered:
+            continue
+
+        word = session.get(Word, word_id)
+        # FR-017: слово могли вывести из оборота или удалить прямо во время занятия
+        if word is None or word.progress is None:
+            continue
+        if word.progress.status not in ACTIVE_STATUSES:
+            continue
+        # Идемпотентность: расписание уже пересчитано после последней попытки
+        if word.progress.updated_at >= max(log.created_at for log in word_attempts):
+            continue
+
+        quality = session_quality(
+            AttemptOutcome(
+                correct=log.correct, used_hint=log.used_hint, attempt=log.attempt
+            )
+            for log in word_attempts
+        )
+        before = state_from_progress(word.progress)
+        write_state(word.progress, apply_answer(before, quality=quality, now=now, rng=rng), now)
+
+        results.append(
+            ReviewFinishResult(
+                word_id=word_id,
+                mistakes=sum(1 for log in word_attempts if not log.correct),
+                quality=quality,
+                progress=ProgressOut.model_validate(word.progress),
+            )
+        )
+
+    session.flush()
+    return results
 
 
 def reset_word(session: Session, word: Word, now: datetime) -> None:

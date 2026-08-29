@@ -3,11 +3,9 @@ import { useMutation } from '@tanstack/react-query'
 
 import { api } from '../api/client'
 import type { AnswerResponse, Exercise, SessionPayload, Word } from '../api/types'
-import { ChoiceCard } from './exercises/ChoiceCard'
-import { DictationCard } from './exercises/DictationCard'
+import { ExerciseView } from './exercises/ExerciseView'
 import { Feedback } from './exercises/Feedback'
 import { IntroCard } from './exercises/IntroCard'
-import { LettersCard } from './exercises/LettersCard'
 import type { AnswerSubmit } from './exercises/types'
 import { ErrorBox } from './ui'
 
@@ -29,7 +27,9 @@ export function StudySession({ session, onFinished }: Props) {
   const [introIndex, setIntroIndex] = useState(0)
   // Список знакомства пополняется на ходу: «Уже знаю» добирает слово взамен
   const [introWords, setIntroWords] = useState<Word[]>(session.new_words)
-  const [queue, setQueue] = useState<Exercise[]>(session.exercises)
+  // Пусто на старте: упражнения приходят ответом на карточку знакомства,
+  // отдельного поля под них в ответе занятия больше нет
+  const [queue, setQueue] = useState<Exercise[]>([])
   const [feedback, setFeedback] = useState<AnswerResponse | null>(null)
   const [tally, setTally] = useState({ answered: 0, correct: 0 })
   // Счётчик показов: входит в key карточки, чтобы состояние ввода
@@ -191,60 +191,4 @@ export function StudySession({ session, onFinished }: Props) {
       ) : null}
     </div>
   )
-}
-
-function ExerciseView({
-  exercise,
-  onAnswer,
-  locked,
-}: {
-  exercise: Exercise
-  onAnswer: (submit: AnswerSubmit) => void
-  locked: boolean
-}) {
-  switch (exercise.type) {
-    case 'intro':
-      return (
-        <IntroCard
-          content={{
-            wordId: exercise.word_id,
-            word: exercise.word,
-            translation: exercise.translation,
-            example: exercise.example,
-            example_translation: exercise.example_translation,
-          }}
-          variant="repeat"
-          onLearn={() => onAnswer({ answer: 'learn', usedHint: false })}
-          locked={locked}
-        />
-      )
-    case 'choice_ru_en':
-    case 'choice_en_ru':
-      return (
-        <ChoiceCard
-          key={`${exercise.word_id}-${exercise.type}`}
-          exercise={exercise}
-          onAnswer={onAnswer}
-          locked={locked}
-        />
-      )
-    case 'letters':
-      return (
-        <LettersCard
-          key={`${exercise.word_id}-letters`}
-          exercise={exercise}
-          onAnswer={onAnswer}
-          locked={locked}
-        />
-      )
-    case 'dictation':
-      return (
-        <DictationCard
-          key={`${exercise.word_id}-dictation`}
-          exercise={exercise}
-          onAnswer={onAnswer}
-          locked={locked}
-        />
-      )
-  }
 }

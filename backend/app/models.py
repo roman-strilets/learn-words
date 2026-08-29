@@ -110,6 +110,10 @@ class ReviewLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, nullable=False, index=True
     )
+    # Ключ занятия-повторения: по нему `finish` собирает все попытки занятия
+    # и выводит итог. NULL — ответ вне занятия-повторения (режим «Изучение»
+    # и все строки, накопленные до появления раундов).
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 
 
 class Setting(Base):

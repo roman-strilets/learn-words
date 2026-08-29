@@ -215,3 +215,19 @@ def test_hint_uses_example_when_available(db_session: Session):
 
     exercise = build_exercise(db_session, word, ExerciseType.CHOICE_EN_RU, rng=random.Random(0))
     assert exercise.hint == "Pushed to the brink."
+
+
+def test_repeat_card_reshuffles_the_letter_bank(db_session: Session, words: list[Word]):
+    """FR-006a: повтор после ошибки — тот же тип, но карточка собрана заново.
+
+    Маска и решение обязаны остаться прежними: меняется только порядок банка,
+    иначе пользователь запоминает раскладку, а не слово.
+    """
+    target = next(w for w in words if w.word == "scrutiny")
+
+    first = build_exercise(db_session, target, ExerciseType.LETTERS, attempt=1)
+    second = build_exercise(db_session, target, ExerciseType.LETTERS, attempt=2)
+
+    assert (second.mask, second.solution) == (first.mask, first.solution)
+    assert sorted(second.letters) == sorted(first.letters)
+    assert second.letters != first.letters

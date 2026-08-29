@@ -9,6 +9,8 @@ from app.routers.deps import get_word
 from app.schemas import (
     AnswerRequest,
     AnswerResponse,
+    ReviewFinishRequest,
+    ReviewFinishResult,
     SelectRequest,
     SelectResponse,
     SessionMode,
@@ -20,6 +22,7 @@ from app.study_service import (
     answer_exercise,
     build_session,
     fetch_new_words,
+    finish_review_session,
     reset_word,
     select_word,
 )
@@ -32,7 +35,7 @@ def get_session_queue(
     mode: SessionMode = Query(description="learn — новые слова, review — слова к повторению"),
     session: Session = Depends(get_session),
 ) -> SessionOut:
-    """Набор занятия: новые слова на знакомство либо очередь упражнений."""
+    """Набор занятия: новые слова на знакомство либо план раундов повторения."""
     return build_session(session, utcnow(), mode)
 
 
@@ -64,6 +67,18 @@ def answer(payload: AnswerRequest, session: Session = Depends(get_session)) -> A
         raise HTTPException(
             status.HTTP_409_CONFLICT, detail="Слово ещё не взято в изучение"
         ) from None
+
+
+@router.post("/review/finish", response_model=list[ReviewFinishResult])
+def finish_review(
+    payload: ReviewFinishRequest, session: Session = Depends(get_session)
+) -> list[ReviewFinishResult]:
+    """Конец занятия-повторения: расписание слов пересчитывается один раз.
+
+    Неизвестный ключ занятия — не ошибка, а пустой список: занятие, в котором
+    не было ни одного ответа, ничего не меняет.
+    """
+    return finish_review_session(session, payload.session_id, utcnow())
 
 
 @router.post("/reset/{word_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models import ExerciseType, WordStatus
 
@@ -171,13 +171,24 @@ class SessionCounts(BaseModel):
     in_study: int
 
 
+class ReviewRound(BaseModel):
+    """Раунд занятия-повторения: один тип упражнения на все слова занятия."""
+
+    exercise: ExerciseType
+    exercises: list[Exercise]
+
+
 class SessionOut(BaseModel):
     """Стартовый набор сессии. Заполнена ровно одна из категорий: в режиме
-    `learn` — новые слова на знакомство, в режиме `review` — очередь упражнений."""
+    `learn` — новые слова на знакомство, в режиме `review` — план из раундов.
+
+    `session_id` выдаётся только для повторения: это не серверное состояние,
+    а ключ, по которому попытки занятия находят друг друга в `review_log`."""
 
     mode: SessionMode
+    session_id: str | None = None
     new_words: list[WordOut]
-    exercises: list[Exercise]
+    rounds: list[ReviewRound] = Field(default_factory=list)
     counts: SessionCounts
 
 
@@ -200,8 +211,21 @@ class AnswerRequest(BaseModel):
     exercise: ExerciseType
     answer: str | None = None
     used_hint: bool = False
+    # Номер показа слова в текущем раунде: вторая и дальше снижают оценку
     attempt: int = Field(default=1, ge=1)
     duration_ms: int | None = Field(default=None, ge=0)
+    mode: SessionMode = SessionMode.LEARN
+    session_id: str | None = None
+
+    @model_validator(mode="after")
+    def _session_id_required_for_review(self) -> AnswerRequest:
+        # Проверка на модели, а не на поле: пропущенный `session_id` берётся
+        # из значения по умолчанию, а полевой валидатор на умолчание не зовут.
+        # Без ключа занятия ответ повторения некуда записать, и `finish`
+        # потом не соберёт итог — отказываем сразу, а не молча теряем попытку.
+        if self.mode is SessionMode.REVIEW and not self.session_id:
+            raise ValueError("session_id обязателен в режиме review")
+        return self
 
 
 class AnswerResponse(BaseModel):
@@ -215,6 +239,19 @@ class AnswerResponse(BaseModel):
     quality: int
     repeat_in_session: bool
     next_exercise: Exercise | None = None
+    progress: ProgressOut
+
+
+class ReviewFinishRequest(BaseModel):
+    session_id: str
+
+
+class ReviewFinishResult(BaseModel):
+    """Итог одного слова за занятие-повторение: что сервер вывел из журнала."""
+
+    word_id: int
+    mistakes: int
+    quality: int
     progress: ProgressOut
 
 

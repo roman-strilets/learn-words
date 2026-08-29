@@ -93,12 +93,20 @@ export interface SessionCounts {
   in_study: number
 }
 
+/** Раунд занятия-повторения: один тип упражнения на все слова занятия. */
+export interface ReviewRound {
+  exercise: ExerciseType
+  exercises: Exercise[]
+}
+
 export interface SessionPayload {
   mode: StudyMode
+  /** Ключ занятия; заполнен в режиме `review`, когда есть что повторять */
+  session_id: string | null
   /** Заполнено в режиме `learn` */
   new_words: Word[]
-  /** Заполнено в режиме `review` */
-  exercises: Exercise[]
+  /** Заполнено в режиме `review`: четыре раунда в фиксированном порядке */
+  rounds: ReviewRound[]
   counts: SessionCounts
 }
 
@@ -114,8 +122,12 @@ export interface AnswerPayload {
   exercise: ExerciseType
   answer: string | null
   used_hint?: boolean
+  /** Номер показа слова в текущем раунде: вторая и дальше снижают оценку */
   attempt?: number
   duration_ms?: number
+  mode?: StudyMode
+  /** Обязателен при `mode: 'review'` — иначе сервер ответит 422 */
+  session_id?: string
 }
 
 export interface AnswerResponse {
@@ -129,6 +141,14 @@ export interface AnswerResponse {
   quality: number
   repeat_in_session: boolean
   next_exercise: Exercise | null
+  progress: Progress
+}
+
+/** Итог одного слова за занятие-повторение, посчитанный сервером по журналу. */
+export interface ReviewFinishResult {
+  word_id: number
+  mistakes: number
+  quality: number
   progress: Progress
 }
 

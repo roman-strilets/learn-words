@@ -11,12 +11,15 @@ from app.srs import (
     FIRST_INTERVAL_DAYS,
     LEARNING_STEPS,
     RELEARN_STEP,
+    REVIEW_ROUNDS,
+    AttemptOutcome,
     SrsState,
     apply_answer,
     derive_quality,
     exercise_for,
     force_status,
     mark_known,
+    session_quality,
     start_learning,
     update_ease,
 )
@@ -143,12 +146,38 @@ def test_known_word_is_frozen():
     assert apply_answer(state, quality=2, now=NOW, rng=NO_JITTER) == state
 
 
-def test_review_exercises_never_include_intro():
-    rng = random.Random(0)
-    state = SrsState(status=WordStatus.REVIEW, repetitions=3, due_at=NOW)
-    picked = {exercise_for(state, rng) for _ in range(50)}
-    assert ExerciseType.INTRO not in picked
-    assert len(picked) > 1
+def test_review_rounds_are_fixed_and_skip_the_intro_card():
+    # FR-004: порядок раундов задан спецификацией и не зависит от слова
+    assert REVIEW_ROUNDS == (
+        ExerciseType.CHOICE_RU_EN,
+        ExerciseType.CHOICE_EN_RU,
+        ExerciseType.LETTERS,
+        ExerciseType.DICTATION,
+    )
+    # FR-005: знакомому слову карточка-знакомство не показывается
+    assert ExerciseType.INTRO not in REVIEW_ROUNDS
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "expected"),
+    [
+        # Безошибочное занятие с первого показа и без подсказок
+        ([(True, False, 1), (True, False, 1), (True, False, 1), (True, False, 1)], 5),
+        # Подсказка в одном раунде опускает итог до 4
+        ([(True, False, 1), (True, True, 1), (True, False, 1), (True, False, 1)], 4),
+        # Повторный показ весомее подсказки: 3
+        ([(True, True, 1), (True, False, 2), (True, False, 1), (True, False, 1)], 3),
+        # Любая ошибка за занятие означает «забыто», даже если её исправили
+        ([(False, False, 1), (True, False, 2), (True, False, 1), (True, False, 1)], 2),
+        # Одна попытка — оценка совпадает с обычной
+        ([(True, False, 1)], 5),
+    ],
+)
+def test_session_quality_is_the_worst_attempt(outcomes, expected):
+    attempts = [
+        AttemptOutcome(correct=c, used_hint=h, attempt=a) for c, h, a in outcomes
+    ]
+    assert session_quality(attempts) == expected
 
 
 def test_forced_review_releases_a_word_without_a_schedule():

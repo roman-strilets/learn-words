@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
@@ -27,20 +28,15 @@ LEARNING_STEPS: tuple[ExerciseType, ...] = (
 # Не 0: показывать карточку-знакомство знакомому слову бессмысленно.
 RELEARN_STEP = 1
 
-# Упражнения для режима повторения (без карточки-знакомства).
-REVIEW_EXERCISES: tuple[ExerciseType, ...] = (
+# Раунды занятия-повторения: по раунду на тип упражнения, порядок фиксирован
+# и растёт по сложности — узнавание, обратный перевод, сборка, воспроизведение
+# на слух. Карточка-знакомство в повторении не участвует: слово уже знакомо.
+REVIEW_ROUNDS: tuple[ExerciseType, ...] = (
+    ExerciseType.CHOICE_RU_EN,
     ExerciseType.CHOICE_EN_RU,
     ExerciseType.LETTERS,
     ExerciseType.DICTATION,
 )
-
-# Веса выбора упражнения на повторении: чем дольше слово живёт, тем чаще
-# попадаются сложные форматы.
-_REVIEW_WEIGHTS: tuple[tuple[int, tuple[int, int, int]], ...] = (
-    (2, (3, 2, 1)),
-    (5, (2, 3, 2)),
-)
-_REVIEW_WEIGHTS_LATE = (1, 3, 3)
 
 FIRST_INTERVAL_DAYS = 1.0
 SECOND_INTERVAL_DAYS = 3.0
@@ -135,22 +131,40 @@ def force_status(
     return _graduate(state, now=now, rng=rng)
 
 
-def exercise_for(state: SrsState, rng: random.Random | None = None) -> ExerciseType:
-    """Какое упражнение показать для текущего состояния слова."""
-    if state.status == WordStatus.LEARNING:
-        return LEARNING_STEPS[min(state.step, len(LEARNING_STEPS) - 1)]
-    return pick_review_exercise(state.repetitions, rng)
+def exercise_for(state: SrsState) -> ExerciseType:
+    """Какой шаг знакомства показать для текущего состояния слова.
+
+    Зовётся только для слов в learning: у повторения свой порядок раундов
+    (`REVIEW_ROUNDS`), который не зависит от состояния отдельного слова.
+    """
+    return LEARNING_STEPS[min(state.step, len(LEARNING_STEPS) - 1)]
 
 
-def pick_review_exercise(repetitions: int, rng: random.Random | None = None) -> ExerciseType:
-    weights = _REVIEW_WEIGHTS_LATE
-    for threshold, candidate in _REVIEW_WEIGHTS:
-        if repetitions <= threshold:
-            weights = candidate
-            break
-    if rng is None:
-        return REVIEW_EXERCISES[weights.index(max(weights))]
-    return rng.choices(REVIEW_EXERCISES, weights=weights, k=1)[0]
+@dataclass(frozen=True, slots=True)
+class AttemptOutcome:
+    """Одна попытка ответа: всё, из чего выводится её оценка."""
+
+    correct: bool
+    used_hint: bool
+    attempt: int
+
+
+def session_quality(outcomes: Iterable[AttemptOutcome]) -> int:
+    """Итоговая оценка слова за занятие-повторение — худшая из попыток.
+
+    Слово проходит четыре раунда, но расписание двигается один раз, поэтому
+    оценка нужна одна. Берём минимум: одна ошибка за занятие означает, что
+    слово забыто, сколько бы верных ответов ни было рядом.
+
+    Пустой ввод — ошибка вызывающего: у слова без единой попытки нечего
+    оценивать, и расписание ему не пересчитывают.
+    """
+    return min(
+        derive_quality(
+            correct=outcome.correct, used_hint=outcome.used_hint, attempt=outcome.attempt
+        )
+        for outcome in outcomes
+    )
 
 
 def apply_answer(
