@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.models import ExerciseType
+from app.models import ExerciseType, WordStatus
 
 # --------------------------------------------------------------------------- слова
 
@@ -42,6 +42,16 @@ class WordUpdate(BaseModel):
     translation: str | None = Field(default=None, min_length=1)
     example: str | None = None
     example_translation: str | None = None
+
+
+class WordStatusUpdate(BaseModel):
+    """Статус, выставленный вручную из словаря.
+
+    `new` — единственное значение вне `WordStatus`: у нового слова строки
+    прогресса нет, поэтому переход в него её удаляет.
+    """
+
+    status: WordStatus | Literal["new"]
 
 
 class ProgressOut(BaseModel):

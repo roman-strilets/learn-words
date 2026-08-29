@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 from collections.abc import Sequence
 from datetime import datetime, timedelta
+from typing import Literal
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -23,7 +24,15 @@ from app.schemas import (
     SessionOut,
     WordOut,
 )
-from app.srs import SrsState, apply_answer, derive_quality, exercise_for, mark_known, start_learning
+from app.srs import (
+    SrsState,
+    apply_answer,
+    derive_quality,
+    exercise_for,
+    force_status,
+    mark_known,
+    start_learning,
+)
 
 ACTIVE_STATUSES = (WordStatus.LEARNING.value, WordStatus.REVIEW.value)
 
@@ -335,6 +344,37 @@ def reset_word(session: Session, word: Word, now: datetime) -> None:
         session.delete(word.progress)
         word.progress = None
         session.flush()
+
+
+def set_word_status(
+    session: Session,
+    word: Word,
+    status: WordStatus | Literal["new"],
+    now: datetime,
+    rng: random.Random | None = None,
+) -> Progress | None:
+    """Сменить статус слова вручную — из словаря, а не по ходу занятия.
+
+    `new` — не статус, а его отсутствие: строка прогресса удаляется и слово
+    снова становится новым. Ответом такая правка не считается, поэтому
+    в `review_log` ничего не пишем.
+    """
+    if status == "new":
+        reset_word(session, word, now)
+        return None
+
+    progress = word.progress
+    if progress is None:
+        # Слово ещё не в изучении: заводим строку прогресса, как при «Изучить»
+        progress = Progress(word_id=word.id, started_at=now, updated_at=now)
+        write_state(progress, start_learning(now), now)
+        session.add(progress)
+        word.progress = progress
+
+    state = force_status(state_from_progress(progress), WordStatus(status), now, rng)
+    write_state(progress, state, now)
+    session.flush()
+    return progress
 
 
 def due_counts(session: Session, now: datetime) -> tuple[int, int]:

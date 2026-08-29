@@ -8,12 +8,14 @@ import pytest
 from app.config import settings
 from app.models import ExerciseType, WordStatus
 from app.srs import (
+    FIRST_INTERVAL_DAYS,
     LEARNING_STEPS,
     RELEARN_STEP,
     SrsState,
     apply_answer,
     derive_quality,
     exercise_for,
+    force_status,
     mark_known,
     start_learning,
     update_ease,
@@ -147,3 +149,47 @@ def test_review_exercises_never_include_intro():
     picked = {exercise_for(state, rng) for _ in range(50)}
     assert ExerciseType.INTRO not in picked
     assert len(picked) > 1
+
+
+def test_forced_review_releases_a_word_without_a_schedule():
+    state = force_status(start_learning(NOW), WordStatus.REVIEW, NOW, NO_JITTER)
+
+    assert state.status == WordStatus.REVIEW
+    assert state.repetitions == 1
+    assert state.interval_days == FIRST_INTERVAL_DAYS
+    assert state.due_at == NOW + timedelta(days=FIRST_INTERVAL_DAYS)
+
+
+def test_forced_status_keeps_the_schedule_of_a_word_out_of_rotation():
+    released = SrsState(
+        status=WordStatus.REVIEW,
+        repetitions=4,
+        ease=2.3,
+        interval_days=12.0,
+        lapses=1,
+        due_at=NOW + timedelta(days=12),
+    )
+
+    paused = force_status(released, WordStatus.SUSPENDED, NOW, NO_JITTER)
+    assert paused.status == WordStatus.SUSPENDED
+
+    back = force_status(paused, WordStatus.REVIEW, NOW, NO_JITTER)
+    assert back == released
+
+
+def test_forced_learning_returns_to_the_first_step_but_keeps_history():
+    released = SrsState(
+        status=WordStatus.REVIEW,
+        repetitions=4,
+        ease=2.3,
+        interval_days=12.0,
+        lapses=1,
+        due_at=NOW + timedelta(days=12),
+    )
+
+    state = force_status(released, WordStatus.LEARNING, NOW, NO_JITTER)
+
+    assert (state.status, state.step, state.due_at) == (WordStatus.LEARNING, 0, NOW)
+    assert state.interval_days == 0.0
+    # Ручная правка — не ответ: накопленную историю она не стирает
+    assert (state.ease, state.lapses) == (2.3, 1)

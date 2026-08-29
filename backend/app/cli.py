@@ -3,7 +3,9 @@
     uv run --directory backend python -m app.cli import ../dictionary.csv
 
 Импорт идемпотентен: слова дедуплицируются по `word_key`, повторный запуск
-не плодит дубли, а лишь дополняет существующие записи.
+не плодит дубли, а лишь дополняет существующие записи. Значения из CSV
+сливаются в одну запись на слово; отдельные записи под разные значения
+заводятся вручную через форму, и импорт их не трогает.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,6 +45,22 @@ class ImportReport:
         )
 
 
+def _row_for_translation(rows: list[Word], translation: str) -> Word | None:
+    """Куда дописывать значение из CSV.
+
+    У слова может быть несколько записей — по одной на значение, заведённых
+    вручную. Импорт дописывает в ту, где это значение уже есть, а если такой
+    нет — в первую: новые записи под каждое значение он не плодит.
+    """
+    if not rows:
+        return None
+    variants = translation_variants(translation)
+    for row in rows:
+        if translation_variants(row.translation) & variants:
+            return row
+    return rows[0]
+
+
 def _merge_translation(existing: str, incoming: str) -> str:
     """Дописать новое значение к переводу, если его там ещё нет."""
     if not incoming:
@@ -63,7 +82,9 @@ def import_csv(path: Path, session) -> ImportReport:
 
         # Существующие слова держим в памяти: 7 тысяч ключей дешевле, чем
         # столько же SELECT-ов по одному.
-        index: dict[str, Word] = {w.word_key: w for w in session.scalars(select(Word))}
+        index: dict[str, list[Word]] = defaultdict(list)
+        for existing_word in session.scalars(select(Word)):
+            index[existing_word.word_key].append(existing_word)
 
         for row in reader:
             report.rows += 1
@@ -77,7 +98,7 @@ def import_csv(path: Path, session) -> ImportReport:
             example = (row.get("example") or "").strip() or None
             example_translation = (row.get("example_translation") or "").strip() or None
 
-            existing = index.get(key)
+            existing = _row_for_translation(index[key], translation)
             if existing is None:
                 word = Word(
                     word=word_text,
@@ -88,7 +109,7 @@ def import_csv(path: Path, session) -> ImportReport:
                     created_at=now,
                 )
                 session.add(word)
-                index[key] = word
+                index[key].append(word)
                 report.created += 1
                 continue
 

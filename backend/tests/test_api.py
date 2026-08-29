@@ -255,7 +255,7 @@ def test_reset_returns_word_to_new(client: TestClient, words: list[Word]):
     assert client.get(f"/api/words/{word_id}").json()["progress"] is None
 
 
-def test_create_word_and_reject_duplicate(client: TestClient):
+def test_create_word_and_reject_the_same_meaning(client: TestClient):
     created = client.post(
         "/api/words",
         json={"word": " Serendipity ", "translation": "счастливая случайность"},
@@ -264,10 +264,59 @@ def test_create_word_and_reject_duplicate(client: TestClient):
     assert created.json()["word"] == "Serendipity"
 
     duplicate = client.post(
-        "/api/words", json={"word": "serendipity", "translation": "другое значение"}
+        "/api/words",
+        json={"word": "serendipity", "translation": "СЧАСТЛИВАЯ  СЛУЧАЙНОСТЬ"},
     )
     assert duplicate.status_code == 409
     assert "уже есть" in duplicate.json()["detail"]
+
+
+def test_create_word_allows_another_meaning(client: TestClient):
+    first = client.post("/api/words", json={"word": "roll out", "translation": "вылезать"})
+    second = client.post(
+        "/api/words",
+        json={
+            "word": "roll out",
+            "translation": "внедрить",
+            "example": "The school will roll out a new platform.",
+        },
+    )
+
+    assert second.status_code == 201
+    assert second.json()["id"] != first.json()["id"]
+
+    listed = client.get("/api/words", params={"search": "roll out"}).json()
+    assert [w["translation"] for w in listed["items"]] == ["вылезать", "внедрить"]
+    # Каждое значение учится само по себе — оба попадают в занятие
+    offered = {w["id"] for w in _session(client, "learn")["new_words"]}
+    assert {first.json()["id"], second.json()["id"]} <= offered
+
+
+def test_meanings_of_one_word_keep_separate_progress(client: TestClient):
+    first = client.post("/api/words", json={"word": "roll out", "translation": "вылезать"}).json()
+    second = client.post("/api/words", json={"word": "roll out", "translation": "внедрить"}).json()
+
+    client.post("/api/study/select", json={"word_id": first["id"], "action": "learn"})
+
+    assert client.get(f"/api/words/{first['id']}").json()["progress"]["status"] == (
+        WordStatus.LEARNING
+    )
+    assert client.get(f"/api/words/{second['id']}").json()["progress"] is None
+
+
+def test_update_word_rejects_meaning_of_a_twin(client: TestClient):
+    client.post("/api/words", json={"word": "roll out", "translation": "вылезать"})
+    second = client.post(
+        "/api/words", json={"word": "roll out", "translation": "внедрить"}
+    ).json()
+
+    clash = client.patch(f"/api/words/{second['id']}", json={"translation": "вылезать"})
+    assert clash.status_code == 409
+
+    # Правка, не задевающая соседнее значение, проходит
+    ok = client.patch(f"/api/words/{second['id']}", json={"translation": "развернуть"})
+    assert ok.status_code == 200
+    assert ok.json()["translation"] == "развернуть"
 
 
 def test_new_word_is_offered_for_study(client: TestClient, db_session: Session):
@@ -299,6 +348,56 @@ def test_deleting_word_removes_progress(
     client.delete(f"/api/words/{word_id}")
     db_session.expire_all()
     assert db_session.get(Progress, word_id) is None
+
+
+def test_status_change_takes_a_word_out_of_rotation(client: TestClient, words: list[Word]):
+    word_id = _first_new_word(client)["id"]
+    client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
+
+    known = client.put(f"/api/words/{word_id}/status", json={"status": WordStatus.KNOWN})
+    assert known.status_code == 200
+    assert known.json()["progress"]["status"] == WordStatus.KNOWN
+    # Выведенное из оборота слово не попадает ни в новые, ни в повторение
+    assert word_id not in {w["id"] for w in _session(client, "learn")["new_words"]}
+    assert word_id not in {e["word_id"] for e in _session(client, "review")["exercises"]}
+
+
+def test_status_change_releases_a_new_word_into_review(client: TestClient, words: list[Word]):
+    word_id = words[0].id
+
+    body = client.put(f"/api/words/{word_id}/status", json={"status": WordStatus.REVIEW}).json()
+
+    assert body["progress"]["status"] == WordStatus.REVIEW
+    assert body["progress"]["repetitions"] == 1
+    assert body["progress"]["interval_days"] == 1.0
+
+
+def test_suspended_word_keeps_its_schedule(client: TestClient, words: list[Word]):
+    word_id = words[0].id
+    released = client.put(
+        f"/api/words/{word_id}/status", json={"status": WordStatus.REVIEW}
+    ).json()
+
+    client.put(f"/api/words/{word_id}/status", json={"status": WordStatus.SUSPENDED})
+    back = client.put(f"/api/words/{word_id}/status", json={"status": WordStatus.REVIEW}).json()
+
+    assert back["progress"]["due_at"] == released["progress"]["due_at"]
+    assert back["progress"]["ease"] == released["progress"]["ease"]
+
+
+def test_status_new_drops_the_progress(client: TestClient, words: list[Word]):
+    word_id = _first_new_word(client)["id"]
+    client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
+
+    body = client.put(f"/api/words/{word_id}/status", json={"status": "new"}).json()
+
+    assert body["progress"] is None
+    assert word_id in {w["id"] for w in _session(client, "learn")["new_words"]}
+
+
+def test_unknown_status_is_rejected(client: TestClient, words: list[Word]):
+    response = client.put(f"/api/words/{words[0].id}/status", json={"status": "выучено"})
+    assert response.status_code == 422
 
 
 def test_words_search_and_status_filter(client: TestClient, words: list[Word]):

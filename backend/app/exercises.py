@@ -62,7 +62,7 @@ def normalize_answer(text: str | None) -> str:
 
 
 def word_key_for(word: str) -> str:
-    """Ключ дедупликации слова в словаре."""
+    """Общий ключ всех записей одного слова: по нему они находят друг друга."""
     return _SPACES.sub(" ", word.strip().lower())
 
 
@@ -155,7 +155,9 @@ def pick_distractor_words(
     if len(shortlist) < count:
         filler = (
             select(Word)
-            .where(Word.id != word.id, Word.id.notin_(seen or {0}))
+            # `word_key` отсекает соседние значения того же слова: два одинаковых
+            # варианта ответа в карточке выглядели бы опечаткой.
+            .where(Word.id != word.id, Word.word_key != key, Word.id.notin_(seen or {0}))
             .order_by(func.random())
             .limit(count * 3)
         )

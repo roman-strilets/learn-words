@@ -4,10 +4,18 @@ from sqlalchemy.orm import Session
 
 from app.clock import utcnow
 from app.db import get_session
-from app.exercises import word_key_for
+from app.exercises import translation_variants, word_key_for
 from app.models import Progress, Word, WordStatus
 from app.routers.deps import get_word
-from app.schemas import WordCreate, WordOut, WordPage, WordUpdate, WordWithProgress
+from app.schemas import (
+    WordCreate,
+    WordOut,
+    WordPage,
+    WordStatusUpdate,
+    WordUpdate,
+    WordWithProgress,
+)
+from app.study_service import set_word_status
 
 router = APIRouter(prefix="/words", tags=["words"])
 
@@ -50,15 +58,37 @@ def list_words(
     )
 
 
+def _same_meaning(
+    session: Session, key: str, translation: str, *, exclude_id: int | None = None
+) -> Word | None:
+    """Запись того же слова с тем же значением.
+
+    Слово можно завести ещё раз ради другого значения, поэтому дубль ищется
+    по паре: совпал ключ слова и хотя бы одно значение перевода.
+    """
+    stmt = select(Word).where(Word.word_key == key)
+    if exclude_id is not None:
+        stmt = stmt.where(Word.id != exclude_id)
+    variants = translation_variants(translation)
+    return next(
+        (w for w in session.scalars(stmt) if translation_variants(w.translation) & variants),
+        None,
+    )
+
+
+def _duplicate(existing: Word) -> HTTPException:
+    return HTTPException(
+        status.HTTP_409_CONFLICT,
+        detail=f"Слово «{existing.word}» с переводом «{existing.translation}» уже есть в словаре",
+    )
+
+
 @router.post("", response_model=WordOut, status_code=status.HTTP_201_CREATED)
 def create_word(payload: WordCreate, session: Session = Depends(get_session)) -> Word:
     key = word_key_for(payload.word)
-    existing = session.scalar(select(Word).where(Word.word_key == key))
+    existing = _same_meaning(session, key, payload.translation)
     if existing is not None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail=f"Слово «{existing.word}» уже есть в словаре (перевод: {existing.translation})",
-        )
+        raise _duplicate(existing)
 
     word = Word(
         word=payload.word,
@@ -86,22 +116,34 @@ def update_word(
 ) -> Word:
     data = payload.model_dump(exclude_unset=True)
 
-    if "word" in data and data["word"]:
-        key = word_key_for(data["word"])
-        clash = session.scalar(select(Word).where(Word.word_key == key, Word.id != word.id))
-        if clash is not None:
-            raise HTTPException(status.HTTP_409_CONFLICT, detail="Такое слово уже есть в словаре")
-        word.word = data["word"].strip()
-        word.word_key = key
+    spelling = (data.get("word") or word.word).strip()
+    translation = (data.get("translation") or word.translation).strip()
+    key = word_key_for(spelling)
+    # Правка не должна свести запись к значению, которое уже заведено отдельно
+    clash = _same_meaning(session, key, translation, exclude_id=word.id)
+    if clash is not None:
+        raise _duplicate(clash)
 
-    if data.get("translation"):
-        word.translation = data["translation"].strip()
+    word.word = spelling
+    word.word_key = key
+    word.translation = translation
     if "example" in data:
         word.example = (data["example"] or "").strip() or None
     if "example_translation" in data:
         word.example_translation = (data["example_translation"] or "").strip() or None
 
     session.flush()
+    return word
+
+
+@router.put("/{word_id}/status", response_model=WordWithProgress)
+def set_status(
+    payload: WordStatusUpdate,
+    word: Word = Depends(get_word),
+    session: Session = Depends(get_session),
+) -> Word:
+    """Перевести слово в другой статус вручную — из словаря, а не занятием."""
+    set_word_status(session, word, payload.status, utcnow())
     return word
 
 

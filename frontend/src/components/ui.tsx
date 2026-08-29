@@ -108,6 +108,39 @@ export function SpeakButton({
   )
 }
 
+/** Поле формы словаря: подпись сверху, инпут во всю ширину. */
+export function TextField({
+  label,
+  value,
+  onChange,
+  required,
+  autoFocus,
+  className = '',
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  required?: boolean
+  autoFocus?: boolean
+  className?: string
+}) {
+  return (
+    <label className="flex flex-col gap-2">
+      <span className="text-sm text-muted">
+        {label}
+        {required ? <span className="text-wrong"> *</span> : null}
+      </span>
+      <input
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        autoFocus={autoFocus}
+        autoComplete="off"
+        className={`w-full rounded border border-hairline px-4 py-3 outline-none focus:border-accent ${className}`}
+      />
+    </label>
+  )
+}
+
 export function Prompt({
   children,
   hint,

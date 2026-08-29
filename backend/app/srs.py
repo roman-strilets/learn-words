@@ -104,6 +104,37 @@ def mark_known(now: datetime) -> SrsState:
     return SrsState(status=WordStatus.KNOWN, step=len(LEARNING_STEPS), due_at=now)
 
 
+def force_status(
+    state: SrsState,
+    status: WordStatus,
+    now: datetime,
+    rng: random.Random | None = None,
+) -> SrsState:
+    """Статус, выставленный вручную из словаря.
+
+    Это не ответ на упражнение: ease и lapses остаются прежними, меняется
+    только то, без чего новый статус не имеет смысла. Расписание слова,
+    выведенного из оборота, замирает — возврат в review поднимет прежний срок.
+    """
+    if status in (WordStatus.KNOWN, WordStatus.SUSPENDED):
+        return replace(state, status=status)
+
+    if status == WordStatus.LEARNING:
+        return replace(
+            state,
+            status=status,
+            step=0,
+            repetitions=0,
+            interval_days=0.0,
+            due_at=now,
+        )
+
+    if state.interval_days > 0:
+        # Слово уже выпускалось: накопленное расписание важнее нового
+        return replace(state, status=WordStatus.REVIEW, due_at=state.due_at or now)
+    return _graduate(state, now=now, rng=rng)
+
+
 def exercise_for(state: SrsState, rng: random.Random | None = None) -> ExerciseType:
     """Какое упражнение показать для текущего состояния слова."""
     if state.status == WordStatus.LEARNING:

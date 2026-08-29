@@ -3,9 +3,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router'
 
 import { api } from '../api/client'
-import type { WordWithProgress } from '../api/types'
+import type { WordStatusValue, WordWithProgress } from '../api/types'
 import { STATUS_CLASS, STATUS_LABEL, formatDue } from '../lib/format'
 import { ErrorBox, Spinner } from '../components/ui'
+import { SpeakerIcon } from '../components/icons'
+import { WordForm } from '../components/WordForm'
+import { useSpeech } from '../speech/SpeechProvider'
 
 const PAGE_SIZE = 25
 
@@ -17,20 +20,46 @@ const FILTERS = [
   { value: 'known', label: 'Знаю' },
 ]
 
-function StatusBadge({ word }: { word: WordWithProgress }) {
-  const status = word.progress?.status ?? 'new'
+const STATUSES: WordStatusValue[] = ['new', 'learning', 'review', 'known', 'suspended']
+
+function statusOf(word: WordWithProgress): WordStatusValue {
+  return word.progress?.status ?? 'new'
+}
+
+/** Статус словарной строки: та же плашка, но её можно переключить. */
+function StatusSelect({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: WordStatusValue
+  disabled?: boolean
+  onChange: (status: WordStatusValue) => void
+}) {
   return (
-    <span className={`rounded px-2 py-1 text-xs whitespace-nowrap ${STATUS_CLASS[status]}`}>
-      {STATUS_LABEL[status]}
-    </span>
+    <select
+      value={value}
+      disabled={disabled}
+      onChange={(event) => onChange(event.target.value as WordStatusValue)}
+      title="Сменить статус"
+      className={`cursor-pointer rounded px-2 py-1 text-xs outline-none disabled:opacity-50 ${STATUS_CLASS[value]}`}
+    >
+      {STATUSES.map((status) => (
+        <option key={status} value={status}>
+          {STATUS_LABEL[status]}
+        </option>
+      ))}
+    </select>
   )
 }
 
 export function WordsPage() {
   const queryClient = useQueryClient()
+  const { speak, supported } = useSpeech()
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState('')
   const [page, setPage] = useState(0)
+  const [editingId, setEditingId] = useState<number | null>(null)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['words', search, status, page],
@@ -48,8 +77,15 @@ export function WordsPage() {
     queryClient.invalidateQueries({ queryKey: ['overview'] })
   }
 
-  const resetMutation = useMutation({ mutationFn: api.resetWord, onSuccess: invalidate })
+  const statusMutation = useMutation({ mutationFn: api.setWordStatus, onSuccess: invalidate })
   const deleteMutation = useMutation({ mutationFn: api.deleteWord, onSuccess: invalidate })
+  const updateMutation = useMutation({
+    mutationFn: api.updateWord,
+    onSuccess: () => {
+      setEditingId(null)
+      invalidate()
+    },
+  })
 
   const total = data?.total ?? 0
   const pages = Math.ceil(total / PAGE_SIZE)
@@ -58,6 +94,22 @@ export function WordsPage() {
     setStatus(value)
     setPage(0)
   }
+
+  const startEditing = (wordId: number) => {
+    updateMutation.reset()
+    setEditingId(wordId)
+  }
+
+  const changeStatus = (word: WordWithProgress, next: WordStatusValue) => {
+    // Возврат в новые стирает накопленное расписание — спрашиваем, как на удалении
+    if (next === 'new' && word.progress) {
+      if (!window.confirm(`Сбросить прогресс по «${word.word}»?`)) return
+    }
+    statusMutation.mutate({ id: word.id, status: next })
+  }
+
+  // Ошибка правки живёт в самой форме, остальные показываем над таблицей
+  const rowError = (statusMutation.error ?? deleteMutation.error) as Error | null
 
   return (
     <div className="flex w-full max-w-4xl flex-col gap-6">
@@ -100,6 +152,7 @@ export function WordsPage() {
       </div>
 
       {error ? <ErrorBox message={(error as Error).message} /> : null}
+      {rowError ? <ErrorBox message={rowError.message} /> : null}
       {isLoading ? <Spinner /> : null}
 
       {data ? (
@@ -119,36 +172,73 @@ export function WordsPage() {
               <tbody>
                 {data.items.map((word) => (
                   <tr key={word.id} className="border-b border-hairline/60">
-                    <td className="py-3 pr-4 font-semibold text-ink">{word.word}</td>
-                    <td className="py-3 pr-4 text-ink-soft">{word.translation}</td>
-                    <td className="py-3 pr-4">
-                      <StatusBadge word={word} />
-                    </td>
-                    <td className="py-3 pr-4 text-sm text-muted">
-                      {word.progress ? formatDue(word.progress.due_at) : '—'}
-                    </td>
-                    <td className="py-3 text-right text-sm whitespace-nowrap">
-                      {word.progress ? (
-                        <button
-                          type="button"
-                          onClick={() => resetMutation.mutate(word.id)}
-                          className="mr-3 text-accent underline underline-offset-4"
-                        >
-                          Сбросить
-                        </button>
-                      ) : null}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (window.confirm(`Удалить «${word.word}» из словаря?`)) {
-                            deleteMutation.mutate(word.id)
+                    {editingId === word.id ? (
+                      <td colSpan={5} className="py-4">
+                        <WordForm
+                          word={word}
+                          submitLabel="Сохранить"
+                          columns={2}
+                          pending={updateMutation.isPending}
+                          error={updateMutation.error as Error | null}
+                          onCancel={() => setEditingId(null)}
+                          onSubmit={(payload) =>
+                            updateMutation.mutate({ id: word.id, ...payload })
                           }
-                        }}
-                        className="text-wrong underline underline-offset-4"
-                      >
-                        Удалить
-                      </button>
-                    </td>
+                        />
+                      </td>
+                    ) : (
+                      <>
+                        <td className="py-3 pr-4">
+                          <span className="flex items-center gap-2">
+                            <span className="font-semibold text-ink">{word.word}</span>
+                            <button
+                              type="button"
+                              onClick={() => speak(word.word)}
+                              disabled={!supported}
+                              title="Прослушать"
+                              aria-label={`Прослушать «${word.word}»`}
+                              className="text-muted transition-colors hover:text-correct disabled:opacity-30"
+                            >
+                              <SpeakerIcon className="size-5" />
+                            </button>
+                          </span>
+                        </td>
+                        <td className="py-3 pr-4 text-ink-soft">{word.translation}</td>
+                        <td className="py-3 pr-4">
+                          <StatusSelect
+                            value={statusOf(word)}
+                            disabled={
+                              statusMutation.isPending &&
+                              statusMutation.variables?.id === word.id
+                            }
+                            onChange={(next) => changeStatus(word, next)}
+                          />
+                        </td>
+                        <td className="py-3 pr-4 text-sm text-muted">
+                          {word.progress ? formatDue(word.progress.due_at) : '—'}
+                        </td>
+                        <td className="py-3 text-right text-sm whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={() => startEditing(word.id)}
+                            className="mr-3 text-accent underline underline-offset-4"
+                          >
+                            Изменить
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (window.confirm(`Удалить «${word.word}» из словаря?`)) {
+                                deleteMutation.mutate(word.id)
+                              }
+                            }}
+                            className="text-wrong underline underline-offset-4"
+                          >
+                            Удалить
+                          </button>
+                        </td>
+                      </>
+                    )}
                   </tr>
                 ))}
               </tbody>

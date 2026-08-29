@@ -33,8 +33,8 @@ class Word(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     word: Mapped[str] = mapped_column(String(128), nullable=False)
-    # lower(trim(word)) — ключ дедупликации при импорте и ручном добавлении
-    word_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    # lower(trim(word)) — общий ключ всех значений одного слова
+    word_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     translation: Mapped[str] = mapped_column(Text, nullable=False)
     example: Mapped[str | None] = mapped_column(Text, nullable=True)
     example_translation: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -45,6 +45,13 @@ class Word(Base):
         cascade="all, delete-orphan",
         uselist=False,
         lazy="selectin",
+    )
+
+    # Слово можно завести несколько раз — по записи на каждое значение
+    # («roll out» = «вылезать» и «внедрить»): у значений разный прогресс,
+    # и каждое учится само по себе. Повторять уже заведённое значение незачем.
+    __table_args__ = (
+        Index("ux_words_word_key_translation", "word_key", "translation", unique=True),
     )
 
     def __repr__(self) -> str:

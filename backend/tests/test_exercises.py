@@ -110,6 +110,21 @@ def test_distractors_exclude_same_translation(db_session: Session, words: list[W
     assert twin.id not in {d.id for d in distractors}
 
 
+def test_distractors_exclude_other_meanings_of_the_same_word(
+    db_session: Session, words: list[Word]
+):
+    """У слова может быть несколько записей — в варианты ответа идёт одна."""
+    target = next(w for w in words if w.word == "outsider")
+    twin = Word(word="Outsider", word_key="outsider", translation="изгой")
+    db_session.add(twin)
+    db_session.flush()
+
+    for _ in range(20):
+        exercise = build_exercise(db_session, target, ExerciseType.CHOICE_RU_EN)
+        assert exercise.options.count("outsider") == 1
+        assert "Outsider" not in exercise.options
+
+
 def test_choice_exercise_contains_correct_option(db_session: Session, words: list[Word]):
     target = next(w for w in words if w.word == "outsider")
     exercise = build_exercise(

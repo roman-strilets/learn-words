@@ -4,6 +4,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.cli import import_csv
+from app.clock import utcnow
 from app.models import Word
 
 # Файл намеренно записывается с BOM — как исходный dictionary.csv
@@ -79,3 +80,27 @@ def test_import_is_idempotent(tmp_path, db_session: Session):
     assert second.created == 0
     assert second.merged == 0
     assert db_session.scalar(select(func.count(Word.id))) == count_after_first
+
+
+def test_import_keeps_meanings_entered_by_hand(tmp_path, db_session: Session):
+    """Слово, заведённое вручную дважды, импорт не сливает и не дублирует."""
+    now = utcnow()
+    db_session.add_all(
+        [
+            Word(word="roll out", word_key="roll out", translation="вылезать", created_at=now),
+            Word(word="roll out", word_key="roll out", translation="внедрить", created_at=now),
+        ]
+    )
+    db_session.commit()
+
+    path = tmp_path / "roll.csv"
+    path.write_text(
+        '"word","translation","example","example_translation"\n"roll out","вылезать","",""\n',
+        encoding="utf-8-sig",
+    )
+    report = import_csv(path, db_session)
+
+    assert report.created == 0
+    assert report.merged == 0
+    rows = db_session.scalars(select(Word).where(Word.word_key == "roll out")).all()
+    assert [r.translation for r in rows] == ["вылезать", "внедрить"]

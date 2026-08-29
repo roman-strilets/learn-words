@@ -1,4 +1,4 @@
-import type { WordStatus } from '../api/types'
+import type { WordStatusValue } from '../api/types'
 
 /**
  * Бэкенд отдаёт naive UTC («2026-08-16T10:00:00»), а `new Date()` трактует
@@ -32,7 +32,7 @@ export function formatDue(value: string): string {
   return formatDate(value)
 }
 
-export const STATUS_LABEL: Record<WordStatus | 'new', string> = {
+export const STATUS_LABEL: Record<WordStatusValue, string> = {
   new: 'Новое',
   learning: 'Изучается',
   review: 'На повторении',
@@ -40,7 +40,7 @@ export const STATUS_LABEL: Record<WordStatus | 'new', string> = {
   suspended: 'Отложено',
 }
 
-export const STATUS_CLASS: Record<WordStatus | 'new', string> = {
+export const STATUS_CLASS: Record<WordStatusValue, string> = {
   new: 'bg-hairline text-ink-soft',
   learning: 'bg-accent/10 text-accent',
   review: 'bg-correct-soft text-correct',

@@ -7,6 +7,9 @@ export type ExerciseType =
 
 export type WordStatus = 'learning' | 'review' | 'known' | 'suspended'
 
+/** Статус в словаре: `new` — не статус, а его отсутствие (нет прогресса). */
+export type WordStatusValue = WordStatus | 'new'
+
 /** Что делаем на занятии: знакомимся с новыми словами или повторяем изученные. */
 export type StudyMode = 'learn' | 'review'
 

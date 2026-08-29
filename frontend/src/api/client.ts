@@ -8,6 +8,7 @@ import type {
   StudyMode,
   WordInput,
   WordPage,
+  WordStatusValue,
   WordWithProgress,
 } from './types'
 
@@ -61,9 +62,6 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  resetWord: (wordId: number) =>
-    request<void>(`/study/reset/${wordId}`, { method: 'POST' }),
-
   listWords: (params: {
     search?: string
     status?: string
@@ -82,6 +80,19 @@ export const api = {
     request<WordWithProgress>('/words', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }),
+
+  updateWord: ({ id, ...payload }: WordInput & { id: number }) =>
+    request<WordWithProgress>(`/words/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+
+  // «Новое» тоже статус: сервер на нём удаляет прогресс
+  setWordStatus: ({ id, status }: { id: number; status: WordStatusValue }) =>
+    request<WordWithProgress>(`/words/${id}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ status }),
     }),
 
   deleteWord: (wordId: number) =>
