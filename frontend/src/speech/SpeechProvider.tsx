@@ -11,34 +11,51 @@ import {
 
 import { useLocalStorage } from '../hooks/useLocalStorage'
 
-/** Аватарки голосов — как в списке Kate / Robot / Charlotte на макете. */
-const VOICE_EMOJI = ['👩', '🤖', '👧', '🧑', '👨', '👴', '👩‍🦰', '🧔', '👱']
-
-const FLAG_BY_LANG: Record<string, string> = {
-  'en-US': '🇺🇸',
-  'en-GB': '🇬🇧',
-  'en-AU': '🇦🇺',
-  'en-CA': '🇨🇦',
-  'en-IE': '🇮🇪',
-  'en-IN': '🇮🇳',
-  'en-NZ': '🇳🇿',
-  'en-ZA': '🇿🇦',
-}
+/**
+ * Языковые варианты английского: флаг и русское название.
+ *
+ * Порядок записей задаёт порядок групп на странице настроек, поэтому карта —
+ * Map, а не объект: у неё порядок ключей часть контракта, а не деталь движка.
+ * Список заведомо неполный — браузеры отдают и редкие теги вроде `en-029`,
+ * поэтому у незнакомого варианта есть запасной вид (🌐 и сам тег).
+ */
+const LANG_VARIANTS = new Map<string, { flag: string; label: string }>([
+  ['en-US', { flag: '🇺🇸', label: 'Американский' }],
+  ['en-GB', { flag: '🇬🇧', label: 'Британский' }],
+  ['en-AU', { flag: '🇦🇺', label: 'Австралийский' }],
+  ['en-CA', { flag: '🇨🇦', label: 'Канадский' }],
+  ['en-IE', { flag: '🇮🇪', label: 'Ирландский' }],
+  ['en-IN', { flag: '🇮🇳', label: 'Индийский' }],
+  ['en-NZ', { flag: '🇳🇿', label: 'Новозеландский' }],
+  ['en-ZA', { flag: '🇿🇦', label: 'Южноафриканский' }],
+])
 
 export interface VoiceOption {
   uri: string
   name: string
   lang: string
-  emoji: string
-  flag: string
+  /** Голос, который браузер считает основным: показывается пометкой */
+  isDefault: boolean
   voice: SpeechSynthesisVoice
+}
+
+export interface VoiceGroup {
+  lang: string
+  label: string
+  flag: string
+  /** Голоса варианта, отсортированные по имени */
+  voices: VoiceOption[]
 }
 
 interface SpeechContextValue {
   voices: VoiceOption[]
+  groups: VoiceGroup[]
   selected: VoiceOption | null
-  selectVoice: (uri: string) => void
+  selectVoice: (uri: string | null) => void
   speak: (text: string) => void
+  speakWith: (voice: VoiceOption | null, text: string) => void
+  /** Человекочитаемая причина последнего отказа озвучки; null — отказа не было */
+  error: string | null
   rate: number
   setRate: (rate: number) => void
   autoplay: boolean
@@ -48,7 +65,34 @@ interface SpeechContextValue {
 
 const SpeechContext = createContext<SpeechContextValue | null>(null)
 
-const MAX_VOICES = 9
+/**
+ * Разложить голоса по языковому варианту.
+ *
+ * Чистая функция: одинаковый вход даёт одинаковый порядок групп и голосов
+ * внутри них — голос не переезжает с места на место между открытиями страницы.
+ */
+function groupVoices(voices: VoiceOption[]): VoiceGroup[] {
+  const byLang = new Map<string, VoiceOption[]>()
+  for (const voice of voices) {
+    const group = byLang.get(voice.lang)
+    if (group) group.push(voice)
+    else byLang.set(voice.lang, [voice])
+  }
+
+  // Известные варианты — в порядке карты, незнакомые теги следом по алфавиту
+  const known = [...LANG_VARIANTS.keys()].filter((lang) => byLang.has(lang))
+  const unknown = [...byLang.keys()].filter((lang) => !LANG_VARIANTS.has(lang)).sort()
+
+  return [...known, ...unknown].map((lang) => {
+    const variant = LANG_VARIANTS.get(lang)
+    return {
+      lang,
+      label: variant?.label ?? lang,
+      flag: variant?.flag ?? '🌐',
+      voices: (byLang.get(lang) ?? []).sort((a, b) => a.name.localeCompare(b.name)),
+    }
+  })
+}
 
 function buildUtterance(
   text: string,
@@ -69,6 +113,7 @@ function buildUtterance(
 
 export function SpeechProvider({ children }: { children: ReactNode }) {
   const [voices, setVoices] = useState<VoiceOption[]>([])
+  const [error, setError] = useState<string | null>(null)
   const [selectedUri, setSelectedUri] = useLocalStorage<string | null>(
     'speech.voice',
     null,
@@ -89,20 +134,21 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
     // Список голосов в Chrome приходит асинхронно: разовый getVoices()
     // на монтировании вернул бы пустой массив.
     const load = () => {
-      const english = synth
-        .getVoices()
-        .filter((voice) => voice.lang.toLowerCase().startsWith('en'))
-        // Голос, выбранный браузером по умолчанию, ставим под цифру 1
-        .sort((a, b) => Number(b.default) - Number(a.default))
-        .slice(0, MAX_VOICES)
-        .map((voice, index) => ({
+      const seen = new Set<string>()
+      const english: VoiceOption[] = []
+      for (const voice of synth.getVoices()) {
+        if (!voice.lang.toLowerCase().startsWith('en')) continue
+        // Браузеры изредка отдают один голос дважды — оставляем первый
+        if (seen.has(voice.voiceURI)) continue
+        seen.add(voice.voiceURI)
+        english.push({
           uri: voice.voiceURI,
           name: voice.name.replace(/\s*\(.*\)\s*$/, ''),
           lang: voice.lang,
-          emoji: VOICE_EMOJI[index % VOICE_EMOJI.length],
-          flag: FLAG_BY_LANG[voice.lang] ?? '🌐',
+          isDefault: voice.default,
           voice,
-        }))
+        })
+      }
       setVoices(english)
     }
 
@@ -139,28 +185,35 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
     return stop
   }, [])
 
+  const groups = useMemo(() => groupVoices(voices), [voices])
+
   /**
-   * Голос, выбранный пользователем осознанно.
+   * Голос, выбранный пользователем осознанно; `null` — «Системный голос».
    *
    * Без выбора голос не навязываем: `getVoices()[0]` вполне может оказаться
    * неработающим — сетевые голоса Google молчат без доступа к сети, системные
    * голоса macOS — пока не скачаны. Навязав такой, приложение теряет звук
    * целиком, хотя браузер сам по `lang` подобрал бы рабочий.
+   *
+   * Раньше для списка голосов отсюда отдавался `chosen ?? voices[0]`. Подмена
+   * убрана: с ней пункт «Системный голос» никогда не был бы активным, а
+   * интерфейс утверждал бы выбор, которого нет. Исчезнувший из системы голос
+   * тоже даёт `null` — и список честно показывает системный голос.
    */
-  const chosen = useMemo(
+  const selected = useMemo(
     () => voices.find((voice) => voice.uri === selectedUri) ?? null,
     [voices, selectedUri],
   )
 
-  // Для списка голосов: какой показывать активным, пока выбора не было
-  const selected = useMemo(() => chosen ?? voices[0] ?? null, [chosen, voices])
-
   /**
-   * Озвучить слово. Вызов синхронный: браузер связывает речь с жестом
-   * пользователя, и перенос `speak()` в таймер способен её заблокировать.
+   * Произнести текст заданным голосом. Общее тело `speak` и `speakWith`:
+   * обход зависшей очереди и разбор ошибок должны быть в одном месте.
+   *
+   * Вызов синхронный: браузер связывает речь с жестом пользователя, и перенос
+   * `synth.speak()` в таймер способен её заблокировать.
    */
-  const speak = useCallback(
-    (text: string) => {
+  const say = useCallback(
+    (text: string, voice: SpeechSynthesisVoice | null) => {
       const synth = window.speechSynthesis
       if (!synth || !text) return
 
@@ -172,44 +225,89 @@ export function SpeechProvider({ children }: { children: ReactNode }) {
       // никто не переводил осознанно.
       if (synth.paused) synth.resume()
 
-      const voice = chosen?.voice ?? null
       const utterance = buildUtterance(text, voice, rate)
+      // Заговорил — значит, прошлый отказ больше ничего не объясняет
+      utterance.onstart = () => setError(null)
       utterance.onerror = (event) => {
         // Собственный cancel() тоже приходит сюда — это не отказ
         if (event.error === 'canceled' || event.error === 'interrupted') return
 
-        // Молчание без объяснений — худший исход: называем причину вслух
+        // Молчание без объяснений — худший исход: называем причину и вслух,
+        // и в интерфейсе: до консоли пользователь не дойдёт
         if (event.error === 'not-allowed') {
-          console.error(
-            'Озвучку запретил браузер (not-allowed). Проверьте, что вкладка не ' +
-              'заглушена, а в настройках сайта разрешён звук.',
-          )
+          const message =
+            'Озвучку запретил браузер. Проверьте, что вкладка не заглушена, ' +
+            'а в настройках сайта разрешён звук.'
+          console.error(`${message} (not-allowed)`)
+          setError(message)
           return
         }
         console.error(
           `Озвучка не удалась (${event.error}), голос: ${voice?.name ?? 'системный'}`,
         )
-        // Отказать мог именно выбранный голос — пробуем системный
+        setError(
+          voice
+            ? `Голос «${voice.name}» не произнёс фразу — озвучиваем системным. ` +
+                'Выберите другой голос.'
+            : `Озвучка не удалась (${event.error}).`,
+        )
+        // Отказать мог именно выбранный голос — пробуем системный.
+        // Без onstart: запасная фраза звучит, но объяснение остаётся на виду,
+        // иначе пользователь так и не узнает, почему выбранный голос молчит.
         if (voice) synth.speak(buildUtterance(text, null, rate))
       }
       synth.speak(utterance)
     },
-    [chosen, rate],
+    [rate],
+  )
+
+  /** Озвучить слово голосом, который выбран в настройках. */
+  const speak = useCallback(
+    (text: string) => say(text, selected?.voice ?? null),
+    [say, selected],
+  )
+
+  /**
+   * Произнести текст заданным голосом, минуя сохранённый выбор;
+   * `null` — намеренно без явного голоса (системный).
+   *
+   * Нужен для образца на странице настроек: `setState` асинхронен, и `speak()`
+   * сразу после `selectVoice()` в том же обработчике взял бы предыдущий голос —
+   * пользователь щёлкнул бы по новому голосу, а услышал старый.
+   */
+  const speakWith = useCallback(
+    (voice: VoiceOption | null, text: string) => say(text, voice?.voice ?? null),
+    [say],
   )
 
   const value = useMemo<SpeechContextValue>(
     () => ({
       voices,
+      groups,
       selected,
       selectVoice: setSelectedUri,
       speak,
+      speakWith,
+      error,
       rate,
       setRate,
       autoplay,
       setAutoplay,
       supported: typeof window !== 'undefined' && 'speechSynthesis' in window,
     }),
-    [voices, selected, setSelectedUri, speak, rate, setRate, autoplay, setAutoplay],
+    [
+      voices,
+      groups,
+      selected,
+      setSelectedUri,
+      speak,
+      speakWith,
+      error,
+      rate,
+      setRate,
+      autoplay,
+      setAutoplay,
+    ],
   )
 
   return <SpeechContext.Provider value={value}>{children}</SpeechContext.Provider>
