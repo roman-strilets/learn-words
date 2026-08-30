@@ -1,9 +1,7 @@
-import { useEffect, useState } from 'react'
-
 import { useHotkeys } from '../../hooks/useHotkeys'
 import { useSpeakOnce, useSpeech } from '../../speech/SpeechProvider'
 import { ChevronIcon } from '../icons'
-import { Button, Caption, HintButton, SpeakButton } from '../ui'
+import { Button, Caption, SpeakButton } from '../ui'
 
 export interface IntroContent {
   wordId: number
@@ -37,13 +35,8 @@ export function IntroCard({
   locked,
 }: Props) {
   const { speak, autoplay, supported } = useSpeech()
-  const [showExample, setShowExample] = useState(false)
 
   useSpeakOnce(content.word, autoplay)
-
-  useEffect(() => {
-    setShowExample(false)
-  }, [content.wordId])
 
   useHotkeys(
     {
@@ -61,7 +54,6 @@ export function IntroCard({
   )
 
   const isSelect = variant === 'select'
-  const hasExample = Boolean(content.example)
 
   return (
     <div className="flex flex-col items-center gap-8">
@@ -79,12 +71,7 @@ export function IntroCard({
       </header>
 
       <article className="w-full max-w-xl rounded-lg border border-hairline px-8 py-7">
-        <div className="flex items-start justify-between">
-          <HintButton
-            active={showExample}
-            onClick={() => setShowExample((value) => !value)}
-            title={hasExample ? 'Показать пример' : 'Примера нет'}
-          />
+        <div className="flex items-start justify-end">
           <SpeakButton onClick={() => speak(content.word)} disabled={!supported} />
         </div>
 
@@ -95,18 +82,13 @@ export function IntroCard({
           </p>
         </div>
 
-        {showExample ? (
+        {/* Пример показываем сразу: знакомство со словом идёт вместе с контекстом */}
+        {content.example ? (
           <div className="border-t border-hairline pt-4 text-center">
-            {hasExample ? (
-              <>
-                <p className="text-ink-soft italic">{content.example}</p>
-                {content.example_translation ? (
-                  <p className="mt-1 text-sm text-muted">{content.example_translation}</p>
-                ) : null}
-              </>
-            ) : (
-              <p className="text-sm text-muted">Для этого слова примера нет</p>
-            )}
+            <p className="text-ink-soft italic">{content.example}</p>
+            {content.example_translation ? (
+              <p className="mt-1 text-sm text-muted">{content.example_translation}</p>
+            ) : null}
           </div>
         ) : null}
       </article>
