@@ -4,7 +4,7 @@ import { Link, useSearchParams } from 'react-router'
 
 import { api } from '../api/client'
 import type { StudyMode } from '../api/types'
-import { ReviewSession } from '../components/ReviewSession'
+import { RoundsRunner } from '../components/RoundsRunner'
 import { StudySession } from '../components/StudySession'
 import { MODE_LABEL, StudyModeLinks, studyPath } from '../components/StudyModeLinks'
 import { plural } from '../lib/format'
@@ -105,8 +105,11 @@ export function StudyPage() {
     )
   }
 
-  const empty = data.new_words.length === 0 && data.rounds.length === 0
-  if (empty) {
+  // Занятию нечем заняться. Ключ занятия сервер выдаёт ровно тогда, когда
+  // в занятии есть слова, поэтому его отсутствие значит то же, что пустые
+  // `new_words` в изучении и пустые `rounds` в повторении, — и заодно
+  // ручается раннеру, что sessionId непустой
+  if (!data.session_id) {
     const other: StudyMode = mode === 'learn' ? 'review' : 'learn'
     return (
       <div className="flex flex-col items-center gap-6">
@@ -127,12 +130,24 @@ export function StudyPage() {
     )
   }
 
-  // У режимов разные правила очереди: «Изучение» ведёт список знакомства,
-  // «Повторение» — раунды по типам упражнений.
+  // Режимы расходятся только в начале: «Изучение» сперва ведёт знакомство
+  // и лишь потом запрашивает раунды, «Повторение» получает их вместе
+  // с занятием и идёт в раннер сразу.
   // key: при смене режима очередь и счётчики должны собраться заново
   return mode === 'review' ? (
-    <ReviewSession key={mode} session={data} onFinished={handleFinished} />
+    <RoundsRunner
+      key={mode}
+      rounds={data.rounds}
+      sessionId={data.session_id}
+      mode={mode}
+      onFinished={handleFinished}
+    />
   ) : (
-    <StudySession key={mode} session={data} onFinished={handleFinished} />
+    <StudySession
+      key={mode}
+      session={data}
+      sessionId={data.session_id}
+      onFinished={handleFinished}
+    />
   )
 }

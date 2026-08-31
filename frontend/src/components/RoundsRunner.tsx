@@ -2,7 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 
 import { ApiError, api } from '../api/client'
-import type { AnswerResponse, Exercise, ExerciseType, SessionPayload } from '../api/types'
+import type {
+  AnswerResponse,
+  Exercise,
+  ExerciseRound,
+  ExerciseType,
+  StudyMode,
+} from '../api/types'
 import { ExerciseView } from './exercises/ExerciseView'
 import { Feedback } from './exercises/Feedback'
 import type { AnswerSubmit } from './exercises/types'
@@ -18,7 +24,9 @@ const EXERCISE_LABEL: Record<ExerciseType, string> = {
 }
 
 interface Props {
-  session: SessionPayload
+  rounds: ExerciseRound[]
+  sessionId: string
+  mode: StudyMode
   onFinished: (summary: { answered: number; correct: number }) => void
 }
 
@@ -28,15 +36,15 @@ function isGone(error: unknown): boolean {
 }
 
 /**
- * Раннер занятия-повторения: четыре раунда по типам упражнений.
+ * Раннер раундов: четыре раунда по типам упражнений — один на оба режима.
  *
  * Ошибка возвращает слово в конец текущего раунда с пересобранной карточкой,
  * и следующий раунд не начинается, пока в текущем осталась хоть одна карточка.
- * Расписание внутри занятия не двигается — его пересчитывает `finishReview`
- * один раз, в конце, по журналу занятия.
+ * Расписание внутри занятия не двигается — его пересчитывает `finishSession`
+ * один раз, в конце, по журналу занятия. Изучение и повторение расходятся
+ * только в том, как сервер выводит итог, — очередь у них общая.
  */
-export function ReviewSession({ session, onFinished }: Props) {
-  const rounds = session.rounds
+export function RoundsRunner({ rounds, sessionId, mode, onFinished }: Props) {
   const [roundIndex, setRoundIndex] = useState(0)
   const [queue, setQueue] = useState<Exercise[]>(() => rounds[0]?.exercises ?? [])
   const [feedback, setFeedback] = useState<AnswerResponse | null>(null)
@@ -65,7 +73,7 @@ export function ReviewSession({ session, onFinished }: Props) {
   // Итог занятия показываем только после ответа сервера: если пересчёт не
   // прошёл, вся работа занятия пропала бы молча — лучше дать повторить.
   const finishMutation = useMutation({
-    mutationFn: (sessionId: string) => api.finishReview(sessionId),
+    mutationFn: (id: string) => api.finishSession(id, mode),
     onSuccess: () => onFinished(tally),
   })
 
@@ -94,7 +102,7 @@ export function ReviewSession({ session, onFinished }: Props) {
     const repeat = feedback?.next_exercise ?? null
     setQueue((items) => {
       const rest = items.slice(1)
-      // Повтор встаёт после остальных карточек раунда, а не сразу (FR-007)
+      // Повтор встаёт после остальных карточек раунда, а не сразу (FR-009)
       return repeat ? [...rest, repeat] : rest
     })
     if (repeat) {
@@ -108,7 +116,7 @@ export function ReviewSession({ session, onFinished }: Props) {
     submitting.current = false
   }, [feedback])
 
-  // Раунд закончился — берём следующий и начинаем счёт показов заново (FR-008)
+  // Раунд закончился — берём следующий и начинаем счёт показов заново (FR-010)
   useEffect(() => {
     if (feedback || queue.length > 0 || finished) return
 
@@ -127,16 +135,12 @@ export function ReviewSession({ session, onFinished }: Props) {
   const finish = finishMutation.mutate
   useEffect(() => {
     if (!finished) return
-    if (!session.session_id) {
-      onFinished(tally)
-      return
-    }
-    finish(session.session_id)
-  }, [finished, session.session_id, finish, onFinished, tally])
+    finish(sessionId)
+  }, [finished, sessionId, finish])
 
   const handleAnswer = useCallback(
     ({ answer, usedHint, attempt }: AnswerSubmit) => {
-      if (!current || submitting.current || !session.session_id) return
+      if (!current || submitting.current) return
       submitting.current = true
       answerMutation.mutate({
         word_id: current.word_id,
@@ -147,15 +151,15 @@ export function ReviewSession({ session, onFinished }: Props) {
         // «взято не с первой попытки», поэтому берём большее из двух
         attempt: Math.max(shows[current.word_id] ?? 1, attempt ?? 1),
         duration_ms: Date.now() - startedAt.current,
-        mode: 'review',
-        session_id: session.session_id,
+        mode,
+        session_id: sessionId,
       })
     },
-    [current, answerMutation, shows, session.session_id],
+    [current, answerMutation, shows, mode, sessionId],
   )
 
   // Объём работы: остаток текущего раунда плюс раунды впереди. Повтор после
-  // ошибки удлиняет очередь, и счётчик честно растёт (FR-015).
+  // ошибки удлиняет очередь, и счётчик честно растёт (FR-018).
   const remaining = useMemo(() => {
     const active = rounds[roundIndex]
       ? rounds[roundIndex].exercises.length - dropped.length
@@ -174,7 +178,7 @@ export function ReviewSession({ session, onFinished }: Props) {
           <p className="max-w-md text-center text-muted">
             Ответы занятия сохранены, но расписание слов ещё не пересчитано.
           </p>
-          <Button onClick={() => finish(session.session_id!)}>Повторить</Button>
+          <Button onClick={() => finish(sessionId)}>Повторить</Button>
         </div>
       )
     }

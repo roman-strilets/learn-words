@@ -1,4 +1,4 @@
-"""Интервальные повторения: learning steps + SM-2.
+"""Интервальные повторения: раунды упражнений + SM-2.
 
 Модуль намеренно не знает про SQLAlchemy и не ходит в базу — все функции чистые,
 время и генератор случайных чисел передаются параметрами. Это позволяет
@@ -15,23 +15,21 @@ from datetime import datetime, timedelta
 from app.config import settings
 from app.models import ExerciseType, WordStatus
 
-# Шаги первого знакомства со словом. Проходятся внутри одной сессии,
-# сложность растёт: узнавание -> выбор -> сборка -> воспроизведение на слух.
-LEARNING_STEPS: tuple[ExerciseType, ...] = (
-    ExerciseType.INTRO,
-    ExerciseType.CHOICE_RU_EN,
-    ExerciseType.LETTERS,
-    ExerciseType.DICTATION,
-)
+# Сколько успешных занятий проходит слово, откатившееся в изучение после
+# забывания, прежде чем снова выпуститься в повторения. Тип упражнения из шага
+# не выводится — его задают раунды занятия, поэтому здесь число, а не кортеж.
+RELEARN_STEPS: int = 4
 
 # Шаг, на который откатывается слово, забытое на повторении.
-# Не 0: показывать карточку-знакомство знакомому слову бессмысленно.
+# Не 0: слову, которое когда-то уже было выпущено, начинать с нуля незачем.
 RELEARN_STEP = 1
 
-# Раунды занятия-повторения: по раунду на тип упражнения, порядок фиксирован
-# и растёт по сложности — узнавание, обратный перевод, сборка, воспроизведение
-# на слух. Карточка-знакомство в повторении не участвует: слово уже знакомо.
-REVIEW_ROUNDS: tuple[ExerciseType, ...] = (
+# Раунды занятия: по раунду на тип упражнения, порядок фиксирован и растёт по
+# сложности — узнавание, обратный перевод, сборка, воспроизведение на слух.
+# Порядок один на оба режима: и знакомство с новым словом, и повторение
+# изученного идут одними и теми же четырьмя раундами. Карточка-знакомство
+# в раундах не участвует: на ней слово уже показали.
+EXERCISE_ROUNDS: tuple[ExerciseType, ...] = (
     ExerciseType.CHOICE_RU_EN,
     ExerciseType.CHOICE_EN_RU,
     ExerciseType.LETTERS,
@@ -97,7 +95,7 @@ def start_learning(now: datetime) -> SrsState:
 
 def mark_known(now: datetime) -> SrsState:
     """«Уже знаю»: слово выводится из оборота и больше не предлагается."""
-    return SrsState(status=WordStatus.KNOWN, step=len(LEARNING_STEPS), due_at=now)
+    return SrsState(status=WordStatus.KNOWN, step=RELEARN_STEPS, due_at=now)
 
 
 def force_status(
@@ -128,16 +126,7 @@ def force_status(
     if state.interval_days > 0:
         # Слово уже выпускалось: накопленное расписание важнее нового
         return replace(state, status=WordStatus.REVIEW, due_at=state.due_at or now)
-    return _graduate(state, now=now, rng=rng)
-
-
-def exercise_for(state: SrsState) -> ExerciseType:
-    """Какой шаг знакомства показать для текущего состояния слова.
-
-    Зовётся только для слов в learning: у повторения свой порядок раундов
-    (`REVIEW_ROUNDS`), который не зависит от состояния отдельного слова.
-    """
-    return LEARNING_STEPS[min(state.step, len(LEARNING_STEPS) - 1)]
+    return graduate(state, now=now, rng=rng)
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,18 +182,23 @@ def _apply_learning(
         return replace(state, step=max(0, state.step - 1), due_at=now)
 
     next_step = state.step + 1
-    if next_step < len(LEARNING_STEPS):
+    if next_step < RELEARN_STEPS:
         return replace(state, step=next_step, due_at=now)
-    return _graduate(state, now=now, rng=rng)
+    return graduate(state, now=now, rng=rng)
 
 
-def _graduate(state: SrsState, *, now: datetime, rng: random.Random | None) -> SrsState:
-    """Все шаги пройдены — слово переходит в режим повторений."""
+def graduate(state: SrsState, *, now: datetime, rng: random.Random | None = None) -> SrsState:
+    """Слово прошло занятие и переходит в режим повторений.
+
+    Публичная: занятие-изучение выпускает слово этим переходом напрямую, по
+    итогу четырёх раундов, а не через `apply_answer` — ошибка внутри занятия
+    расписание не наказывает, поэтому `ease` и `lapses` здесь не трогаются.
+    """
     interval = FIRST_INTERVAL_DAYS
     return replace(
         state,
         status=WordStatus.REVIEW,
-        step=len(LEARNING_STEPS),
+        step=RELEARN_STEPS,
         repetitions=1,
         interval_days=interval,
         due_at=now + timedelta(days=interval * _jitter(rng)),

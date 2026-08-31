@@ -21,7 +21,6 @@ from app.schemas import (
     ChoiceRuEnExercise,
     DictationExercise,
     Exercise,
-    IntroExercise,
     LettersExercise,
 )
 
@@ -195,15 +194,6 @@ def build_exercise(
 ) -> Exercise:
     rng = rng or random.Random()
 
-    if exercise_type == ExerciseType.INTRO:
-        return IntroExercise(
-            word_id=word.id,
-            word=word.word,
-            translation=word.translation,
-            example=word.example,
-            example_translation=word.example_translation,
-        )
-
     if exercise_type == ExerciseType.LETTERS:
         return LettersExercise(
             word_id=word.id,
@@ -253,6 +243,9 @@ def correct_answer_for(word: Word, exercise_type: ExerciseType) -> str:
 
 
 def check_answer(word: Word, exercise_type: ExerciseType, answer: str | None) -> bool:
+    # Знакомство — не проверка знания: на нём слово показывают, а не спрашивают.
+    # Отсюда же следует, что упражнением его никогда не пересобирают: карточку
+    # к повтору строят только после неверного ответа, а неверным он не бывает.
     if exercise_type == ExerciseType.INTRO:
         return True
 

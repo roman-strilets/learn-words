@@ -2,8 +2,9 @@ import type {
   AnswerPayload,
   AnswerResponse,
   DailyStat,
-  ReviewFinishResult,
+  ExerciseRound,
   SelectResponse,
+  SessionFinishResult,
   SessionPayload,
   StatsOverview,
   StudyMode,
@@ -51,6 +52,14 @@ export const api = {
   getSession: (mode: StudyMode) =>
     request<SessionPayload>(`/study/session?mode=${mode}`),
 
+  // План раундов изучения: зовётся один раз, когда знакомство пройдено и
+  // состав занятия окончателен — «Уже знаю» до этого момента меняет слова
+  buildRounds: (wordIds: number[]) =>
+    request<ExerciseRound[]>('/study/rounds', {
+      method: 'POST',
+      body: JSON.stringify({ word_ids: wordIds }),
+    }),
+
   select: (wordId: number, action: 'learn' | 'know', excludeIds: number[] = []) =>
     request<SelectResponse>('/study/select', {
       method: 'POST',
@@ -63,12 +72,13 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  // Конец занятия-повторения: сервер сам разбирает журнал занятия и один раз
-  // пересчитывает расписание каждого слова, прошедшего все четыре раунда
-  finishReview: (sessionId: string) =>
-    request<ReviewFinishResult[]>('/study/review/finish', {
+  // Конец занятия: сервер сам разбирает журнал занятия и один раз
+  // пересчитывает расписание каждого слова, прошедшего все четыре раунда.
+  // Режим решает, как выводить итог, и из данных он не выводится
+  finishSession: (sessionId: string, mode: StudyMode) =>
+    request<SessionFinishResult[]>('/study/finish', {
       method: 'POST',
-      body: JSON.stringify({ session_id: sessionId }),
+      body: JSON.stringify({ session_id: sessionId, mode }),
     }),
 
   listWords: (params: {

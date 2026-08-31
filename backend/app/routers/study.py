@@ -9,10 +9,12 @@ from app.routers.deps import get_word
 from app.schemas import (
     AnswerRequest,
     AnswerResponse,
-    ReviewFinishRequest,
-    ReviewFinishResult,
+    ExerciseRound,
+    RoundsRequest,
     SelectRequest,
     SelectResponse,
+    SessionFinishRequest,
+    SessionFinishResult,
     SessionMode,
     SessionOut,
     WordOut,
@@ -20,9 +22,10 @@ from app.schemas import (
 from app.study_service import (
     WordNotInStudyError,
     answer_exercise,
+    build_rounds,
     build_session,
     fetch_new_words,
-    finish_review_session,
+    finish_session,
     reset_word,
     select_word,
 )
@@ -37,6 +40,17 @@ def get_session_queue(
 ) -> SessionOut:
     """Набор занятия: новые слова на знакомство либо план раундов повторения."""
     return build_session(session, utcnow(), mode)
+
+
+@router.post("/rounds", response_model=list[ExerciseRound])
+def rounds(payload: RoundsRequest, session: Session = Depends(get_session)) -> list[ExerciseRound]:
+    """План раундов по словам, взятым в изучение по итогам знакомства.
+
+    Пустой список слов — не ошибка: все слова занятия могли оказаться
+    знакомыми. Слово, выбывшее из оборота между знакомством и запросом,
+    молча пропускается — занятие идёт дальше на остальных.
+    """
+    return build_rounds(session, payload.word_ids)
 
 
 @router.get("/new", response_model=list[WordOut])
@@ -69,16 +83,16 @@ def answer(payload: AnswerRequest, session: Session = Depends(get_session)) -> A
         ) from None
 
 
-@router.post("/review/finish", response_model=list[ReviewFinishResult])
-def finish_review(
-    payload: ReviewFinishRequest, session: Session = Depends(get_session)
-) -> list[ReviewFinishResult]:
-    """Конец занятия-повторения: расписание слов пересчитывается один раз.
+@router.post("/finish", response_model=list[SessionFinishResult])
+def finish(
+    payload: SessionFinishRequest, session: Session = Depends(get_session)
+) -> list[SessionFinishResult]:
+    """Конец занятия: расписание слов пересчитывается один раз.
 
     Неизвестный ключ занятия — не ошибка, а пустой список: занятие, в котором
     не было ни одного ответа, ничего не меняет.
     """
-    return finish_review_session(session, payload.session_id, utcnow())
+    return finish_session(session, payload.session_id, payload.mode, utcnow())
 
 
 @router.post("/reset/{word_id}", status_code=status.HTTP_204_NO_CONTENT)

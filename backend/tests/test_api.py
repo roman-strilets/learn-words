@@ -2,19 +2,14 @@
 
 from datetime import timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.clock import utcnow
 from app.models import ExerciseType, Progress, ReviewLog, Word, WordStatus
-from app.srs import REVIEW_ROUNDS
-
-LEARNING_CHAIN = [
-    ExerciseType.CHOICE_RU_EN,
-    ExerciseType.LETTERS,
-    ExerciseType.DICTATION,
-]
+from app.srs import EXERCISE_ROUNDS
 
 
 def _session(client: TestClient, mode: str):
@@ -34,9 +29,25 @@ def _answer(client: TestClient, word_id: int, exercise: str, answer: str, **extr
     return response.json()
 
 
-def _round_exercises(body: dict) -> list[dict]:
+def _round_exercises(rounds: list[dict]) -> list[dict]:
     """Все упражнения плана занятия подряд — когда порядок раундов не важен."""
-    return [exercise for round_ in body["rounds"] for exercise in round_["exercises"]]
+    return [exercise for round_ in rounds for exercise in round_["exercises"]]
+
+
+def _rounds(client: TestClient, word_ids: list[int]) -> list[dict]:
+    """План раундов по словам, взятым в изучение."""
+    response = client.post("/api/study/rounds", json={"word_ids": word_ids})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _learn_session(client: TestClient, count: int = 5) -> tuple[str, list[int]]:
+    """Пройти знакомство занятия-изучения: ключ занятия и взятые слова."""
+    body = _session(client, "learn")
+    started = [w["id"] for w in body["new_words"]][:count]
+    for word_id in started:
+        client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
+    return body["session_id"], started
 
 
 def _start(client: TestClient, count: int = 5) -> list[int]:
@@ -56,7 +67,7 @@ def _answers_of(words: list[Word], word_ids: list[int]) -> dict[int, dict[str, s
     return {
         word.id: {
             exercise: (word.translation if exercise == ExerciseType.CHOICE_EN_RU else word.word)
-            for exercise in REVIEW_ROUNDS
+            for exercise in EXERCISE_ROUNDS
         }
         for word in words
         if word.id in chosen
@@ -79,8 +90,10 @@ def _release(db_session: Session, word_ids: list[int], interval_days: float = 1.
     db_session.commit()
 
 
-def _finish(client: TestClient, session_id: str):
-    response = client.post("/api/study/review/finish", json={"session_id": session_id})
+def _finish(client: TestClient, session_id: str, mode: str = "review"):
+    response = client.post(
+        "/api/study/finish", json={"session_id": session_id, "mode": mode}
+    )
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -91,13 +104,16 @@ def _play_round(
     round_: dict,
     answers: dict[int, dict[str, str]],
     wrong_for: int | None = None,
-):
+    mode: str = "review",
+) -> int:
     """Пройти раунд целиком: верные ответы на все слова, кроме `wrong_for`.
 
     Ошибку тут же исправляем вторым показом — так занятие доходит до конца,
-    как и требует FR-008.
+    как и требует FR-008. Возвращает число показанных карточек: повтор после
+    ошибки удлиняет раунд.
     """
     exercise_type = round_["exercise"]
+    shown = 0
     for exercise in round_["exercises"]:
         word_id = exercise["word_id"]
         if word_id == wrong_for:
@@ -106,19 +122,22 @@ def _play_round(
                 word_id,
                 exercise_type,
                 "заведомо неверно",
-                mode="review",
+                mode=mode,
                 session_id=session_id,
                 attempt=1,
             )
+            shown += 1
         _answer(
             client,
             word_id,
             exercise_type,
             answers[word_id][exercise_type],
-            mode="review",
+            mode=mode,
             session_id=session_id,
             attempt=2 if word_id == wrong_for else 1,
         )
+        shown += 1
+    return shown
 
 
 def test_health(client: TestClient):
@@ -129,72 +148,75 @@ def test_session_offers_new_words(client: TestClient, words: list[Word]):
     body = _session(client, "learn")
 
     assert len(body["new_words"]) == 5  # new_words_per_session
+    # План изучения приходит отдельным запросом: до конца знакомства
+    # неизвестно, какие слова в занятии останутся
     assert body["rounds"] == []
-    assert body["session_id"] is None
     assert body["counts"]["new"] == 5
     assert body["counts"]["in_study"] == 0
 
 
-def test_full_learning_cycle(client: TestClient, db_session: Session, words: list[Word]):
-    target = _first_new_word(client)
-    word_id, spelling = target["id"], target["word"]
+def test_learn_session_carries_a_session_key(client: TestClient, words: list[Word]):
+    # Ключ занятия нужен и изучению: попытки раундов пишутся под ним,
+    # и по нему же финиш собирает итог
+    assert _session(client, "learn")["session_id"]
 
-    # Экран знакомства: «Изучить» засчитывает карточку и выдаёт первое упражнение
+    for word in words:
+        client.post("/api/study/select", json={"word_id": word.id, "action": "know"})
+
+    empty = _session(client, "learn")
+    assert empty["new_words"] == []
+    assert empty["session_id"] is None
+
+
+def test_full_learning_cycle(client: TestClient, db_session: Session, words: list[Word]):
+    body = _session(client, "learn")
+    session_id = body["session_id"]
+    word_id = body["new_words"][0]["id"]
+
+    # Знакомство: «Изучить» только заводит прогресс, упражнений с собой не несёт
     selected = client.post(
         "/api/study/select", json={"word_id": word_id, "action": "learn"}
     ).json()
     assert selected["progress"]["status"] == WordStatus.LEARNING
-    assert selected["next_exercise"]["type"] == ExerciseType.CHOICE_RU_EN
+    assert selected["progress"]["step"] == 0
 
-    exercise = selected["next_exercise"]
-    for expected_next in LEARNING_CHAIN[1:]:
-        result = _answer(client, word_id, exercise["type"], spelling)
-        assert result["correct"] is True
-        assert result["repeat_in_session"] is True
-        assert result["next_exercise"]["type"] == expected_next
-        exercise = result["next_exercise"]
+    rounds = _rounds(client, [word_id])
+    answers = _answers_of(words, [word_id])
+    for round_ in rounds:
+        _play_round(client, session_id, round_, answers, mode="learn")
 
-    # Последний шаг — выпуск в режим повторений
-    result = _answer(client, word_id, ExerciseType.DICTATION, spelling)
-    assert result["correct"] is True
-    assert result["repeat_in_session"] is False
-    assert result["next_exercise"] is None
-    assert result["progress"]["status"] == WordStatus.REVIEW
-    assert result["progress"]["repetitions"] == 1
-    assert result["progress"]["interval_days"] == 1.0
+    # Четыре раунда позади, а слово всё ещё в изучении: итог подводит финиш
+    db_session.expire_all()
+    assert db_session.get(Progress, word_id).status == WordStatus.LEARNING
 
+    results = _finish(client, session_id, mode="learn")
+    assert [r["word_id"] for r in results] == [word_id]
+    assert results[0]["progress"]["status"] == WordStatus.REVIEW
+    assert results[0]["progress"]["repetitions"] == 1
+    assert results[0]["progress"]["interval_days"] == 1.0
+
+    db_session.expire_all()
     progress = db_session.get(Progress, word_id)
     assert timedelta(hours=20) < progress.due_at - utcnow() < timedelta(hours=28)
 
     logs = db_session.scalars(select(ReviewLog).where(ReviewLog.word_id == word_id)).all()
-    assert [log.exercise for log in logs] == [ExerciseType.INTRO] + LEARNING_CHAIN
+    assert [log.exercise for log in logs] == [ExerciseType.INTRO, *EXERCISE_ROUNDS]
     assert all(log.correct for log in logs)
 
 
-def test_wrong_answer_steps_back_and_repeats(client: TestClient, words: list[Word]):
-    target = _first_new_word(client)
-    word_id, spelling = target["id"], target["word"]
-
-    client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
-    _answer(client, word_id, ExerciseType.CHOICE_RU_EN, spelling)
-
-    result = _answer(client, word_id, ExerciseType.LETTERS, "заведомо неверно")
-
-    assert result["correct"] is False
-    assert result["correct_answer"] == spelling
-    assert result["quality"] == 2
-    assert result["repeat_in_session"] is True
-    assert result["next_exercise"]["type"] == ExerciseType.CHOICE_RU_EN
-    assert result["progress"]["step"] == 1
-
-
-def test_hint_lowers_quality(client: TestClient, words: list[Word]):
-    target = _first_new_word(client)
-    word_id, spelling = target["id"], target["word"]
-    client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
+def test_hint_lowers_quality(client: TestClient, db_session: Session, words: list[Word]):
+    session_id, started = _learn_session(client, 1)
+    word_id = started[0]
+    spelling = db_session.get(Word, word_id).word
 
     result = _answer(
-        client, word_id, ExerciseType.CHOICE_RU_EN, spelling, used_hint=True
+        client,
+        word_id,
+        ExerciseType.CHOICE_RU_EN,
+        spelling,
+        used_hint=True,
+        mode="learn",
+        session_id=session_id,
     )
     assert result["correct"] is True
     assert result["quality"] == 4
@@ -208,7 +230,6 @@ def test_already_known_word_leaves_rotation(
 
     body = client.post("/api/study/select", json={"word_id": word_id, "action": "know"}).json()
     assert body["progress"]["status"] == WordStatus.KNOWN
-    assert body["next_exercise"] is None
 
     offered = {w["id"] for w in _session(client, "learn")["new_words"]}
     assert word_id not in offered
@@ -236,7 +257,7 @@ def test_review_mode_offers_only_due_words(client: TestClient, words: list[Word]
     body = _session(client, "review")
 
     assert body["new_words"] == []
-    assert {e["word_id"] for e in _round_exercises(body)} == set(started)
+    assert {e["word_id"] for e in _round_exercises(body["rounds"])} == set(started)
     assert body["counts"]["learning"] == 5
 
 
@@ -253,7 +274,7 @@ def test_letters_exercise_keeps_the_bank_on_review(
 
     letters = [
         exercise
-        for exercise in _round_exercises(_session(client, "review"))
+        for exercise in _round_exercises(_session(client, "review")["rounds"])
         if exercise["type"] == ExerciseType.LETTERS
     ]
 
@@ -269,7 +290,8 @@ def test_review_mode_is_capped_at_five_words(client: TestClient, words: list[Wor
 
     body = _session(client, "review")
 
-    assert len({e["word_id"] for e in _round_exercises(body)}) == 5  # review_words_per_session
+    # review_words_per_session
+    assert len({e["word_id"] for e in _round_exercises(body["rounds"])}) == 5
     assert body["counts"]["in_study"] == 7
 
 
@@ -311,23 +333,37 @@ def test_replacement_is_absent_when_dictionary_runs_out(client: TestClient, db_s
 
 
 def test_session_rebuilds_after_reload(client: TestClient, words: list[Word]):
-    target = _first_new_word(client)
+    body = _session(client, "learn")
+    session_id = body["session_id"]
+    target = body["new_words"][0]
     word_id, spelling = target["id"], target["word"]
     client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
-    _answer(client, word_id, ExerciseType.CHOICE_RU_EN, spelling)
+    _answer(
+        client,
+        word_id,
+        ExerciseType.CHOICE_RU_EN,
+        spelling,
+        mode="learn",
+        session_id=session_id,
+    )
 
     # Перезагрузка страницы = повторный запрос сессии; прогресс не теряется
     body = _session(client, "review")
-    pending = [e for e in _round_exercises(body) if e["word_id"] == word_id]
+    pending = [e for e in _round_exercises(body["rounds"]) if e["word_id"] == word_id]
     # Слово ждёт в каждом раунде: занятие пересобирается целиком
-    assert [e["type"] for e in pending] == list(REVIEW_ROUNDS)
+    assert [e["type"] for e in pending] == list(EXERCISE_ROUNDS)
     assert body["counts"]["learning"] == 1
 
 
 def test_answer_for_word_not_in_study_is_rejected(client: TestClient, words: list[Word]):
     response = client.post(
         "/api/study/answer",
-        json={"word_id": words[0].id, "exercise": ExerciseType.DICTATION, "answer": "x"},
+        json={
+            "word_id": words[0].id,
+            "exercise": ExerciseType.DICTATION,
+            "answer": "x",
+            "session_id": "занятие",
+        },
     )
     assert response.status_code == 409
 
@@ -444,7 +480,8 @@ def test_status_change_takes_a_word_out_of_rotation(client: TestClient, words: l
     assert known.json()["progress"]["status"] == WordStatus.KNOWN
     # Выведенное из оборота слово не попадает ни в новые, ни в повторение
     assert word_id not in {w["id"] for w in _session(client, "learn")["new_words"]}
-    assert word_id not in {e["word_id"] for e in _round_exercises(_session(client, "review"))}
+    due = _round_exercises(_session(client, "review")["rounds"])
+    assert word_id not in {e["word_id"] for e in due}
 
 
 def test_status_change_releases_a_new_word_into_review(client: TestClient, words: list[Word]):
@@ -546,7 +583,7 @@ def test_review_session_is_a_plan_of_four_rounds(client: TestClient, words: list
     body = _session(client, "review")
 
     assert body["session_id"]
-    assert [r["exercise"] for r in body["rounds"]] == list(REVIEW_ROUNDS)
+    assert [r["exercise"] for r in body["rounds"]] == list(EXERCISE_ROUNDS)
     for round_ in body["rounds"]:
         # В раунде — по одному упражнению своего типа на каждое слово занятия
         assert {e["word_id"] for e in round_["exercises"]} == set(started)
@@ -564,11 +601,11 @@ def test_review_plan_holds_four_exercises_per_word(client: TestClient, words: li
     started = _start(client)
 
     body = _session(client, "review")
-    exercises = _round_exercises(body)
+    exercises = _round_exercises(body["rounds"])
 
     # SC-001, SC-002: занятие — это «слов × 4», сгруппированных по типу
-    assert len(exercises) == len(started) * len(REVIEW_ROUNDS)
-    assert [r["exercise"] for r in body["rounds"]] == list(REVIEW_ROUNDS)
+    assert len(exercises) == len(started) * len(EXERCISE_ROUNDS)
+    assert [r["exercise"] for r in body["rounds"]] == list(EXERCISE_ROUNDS)
 
 
 def test_review_answer_logs_the_attempt_without_touching_the_schedule(
@@ -585,7 +622,7 @@ def test_review_answer_logs_the_attempt_without_touching_the_schedule(
     result = _answer(
         client,
         word_id,
-        REVIEW_ROUNDS[0],
+        EXERCISE_ROUNDS[0],
         spelling,
         mode="review",
         session_id=session_id,
@@ -602,7 +639,7 @@ def test_review_answer_logs_the_attempt_without_touching_the_schedule(
         select(ReviewLog).where(ReviewLog.session_id == session_id)
     ).all()
     assert [log.word_id for log in logged] == [word_id]
-    assert logged[0].exercise == REVIEW_ROUNDS[0]
+    assert logged[0].exercise == EXERCISE_ROUNDS[0]
     assert logged[0].status_before == logged[0].status_after
 
 
@@ -685,16 +722,18 @@ def test_finish_is_idempotent_and_skips_unfinished_words(
     assert db_session.get(Progress, done).due_at == settled
 
 
-def test_review_answer_without_session_id_is_rejected(client: TestClient, words: list[Word]):
+@pytest.mark.parametrize("mode", ["learn", "review"])
+def test_answer_without_session_id_is_rejected(client: TestClient, words: list[Word], mode: str):
+    # Без ключа занятия попытку некуда записать, и финиш не соберёт итог
     word_id = _start(client, 1)[0]
 
     response = client.post(
         "/api/study/answer",
         json={
             "word_id": word_id,
-            "exercise": REVIEW_ROUNDS[0],
+            "exercise": EXERCISE_ROUNDS[0],
             "answer": "x",
-            "mode": "review",
+            "mode": mode,
         },
     )
     assert response.status_code == 422
@@ -776,3 +815,217 @@ def test_a_single_mistake_sends_the_word_back_to_learning(
     assert results[clean]["mistakes"] == 0
     assert results[clean]["progress"]["status"] == WordStatus.REVIEW
     assert db_session.get(Progress, clean).due_at > utcnow()
+
+
+# --------------------------------------------------- занятие-изучение раундами
+
+
+def test_learn_rounds_cover_every_word_in_every_type(client: TestClient, words: list[Word]):
+    _, started = _learn_session(client)
+
+    rounds = _rounds(client, started)
+
+    assert [r["exercise"] for r in rounds] == list(EXERCISE_ROUNDS)
+    for round_ in rounds:
+        # В раунде — по одному упражнению своего типа на каждое слово занятия
+        assert [e["word_id"] for e in round_["exercises"]] == started
+        assert {e["type"] for e in round_["exercises"]} == {round_["exercise"]}
+    # FR-007: карточка-знакомство в раунды не попадает
+    assert ExerciseType.INTRO not in {e["type"] for e in _round_exercises(rounds)}
+
+
+def test_learn_rounds_skip_words_that_left_the_rotation(client: TestClient, words: list[Word]):
+    # FR-019: все слова занятия могли оказаться знакомыми — это не ошибка
+    assert _rounds(client, []) == []
+
+    _, started = _learn_session(client)
+    known, deleted, alive = started[0], started[1], started[2:]
+    client.put(f"/api/words/{known}/status", json={"status": WordStatus.KNOWN})
+    client.delete(f"/api/words/{deleted}")
+
+    rounds = _rounds(client, started)
+
+    # FR-020: слово могли вывести из оборота между знакомством и планом раундов
+    assert [r["exercise"] for r in rounds] == list(EXERCISE_ROUNDS)
+    for round_ in rounds:
+        assert [e["word_id"] for e in round_["exercises"]] == alive
+
+    for word_id in alive:
+        client.put(f"/api/words/{word_id}/status", json={"status": WordStatus.KNOWN})
+    assert _rounds(client, started) == []
+
+
+def test_learn_answer_logs_the_attempt_without_touching_the_schedule(
+    client: TestClient, db_session: Session, words: list[Word]
+):
+    session_id, started = _learn_session(client, 1)
+    word_id = started[0]
+    spelling = db_session.get(Word, word_id).word
+
+    before = db_session.get(Progress, word_id)
+    snapshot = (
+        before.status,
+        before.due_at,
+        before.ease,
+        before.lapses,
+        before.step,
+        before.updated_at,
+    )
+
+    result = _answer(
+        client,
+        word_id,
+        EXERCISE_ROUNDS[0],
+        spelling,
+        mode="learn",
+        session_id=session_id,
+    )
+
+    # FR-015a: ответ внутри занятия только пишется в журнал
+    assert result["correct"] is True
+    assert result["progress"]["status"] == WordStatus.LEARNING
+    db_session.expire_all()
+    after = db_session.get(Progress, word_id)
+    assert (
+        after.status,
+        after.due_at,
+        after.ease,
+        after.lapses,
+        after.step,
+        after.updated_at,
+    ) == snapshot
+
+    # Попытка занятия помечена его ключом; карточка знакомства — нет,
+    # она в раунды не входит и на финиш не влияет
+    logged = db_session.scalars(
+        select(ReviewLog).where(ReviewLog.session_id == session_id)
+    ).all()
+    assert [log.word_id for log in logged] == [word_id]
+    assert logged[0].exercise == EXERCISE_ROUNDS[0]
+    assert logged[0].status_before == logged[0].status_after
+
+
+def test_wrong_learn_answer_repeats_the_same_type(
+    client: TestClient, db_session: Session, words: list[Word]
+):
+    session_id, started = _learn_session(client, 1)
+    word_id = started[0]
+    spelling = db_session.get(Word, word_id).word
+    rounds = _rounds(client, started)
+    original = next(r for r in rounds if r["exercise"] == ExerciseType.LETTERS)["exercises"][0]
+
+    missed = _answer(
+        client,
+        word_id,
+        ExerciseType.LETTERS,
+        "заведомо неверно",
+        mode="learn",
+        session_id=session_id,
+    )
+
+    # FR-008, FR-008a: ошибка повторяет тот же тип упражнения — не откатывает
+    # на предыдущий, — а карточка к повтору собирается заново
+    assert missed["correct"] is False
+    assert missed["correct_answer"] == spelling
+    assert missed["quality"] == 2
+    assert missed["repeat_in_session"] is True
+    assert missed["next_exercise"]["type"] == ExerciseType.LETTERS
+    assert missed["next_exercise"]["word_id"] == word_id
+    assert missed["next_exercise"]["letters"] != original["letters"]
+
+    # Прогресс слова ошибка не двигает: ни шага, ни статуса
+    assert missed["progress"]["status"] == WordStatus.LEARNING
+    assert missed["progress"]["step"] == 0
+    db_session.expire_all()
+    progress = db_session.get(Progress, word_id)
+    assert (progress.status, progress.step) == (WordStatus.LEARNING, 0)
+
+
+def test_a_clean_learn_session_is_four_rounds_of_five(
+    client: TestClient, words: list[Word]
+):
+    session_id, started = _learn_session(client)
+    answers = _answers_of(words, started)
+
+    rounds = _rounds(client, started)
+    shown = sum(
+        _play_round(client, session_id, round_, answers, mode="learn") for round_ in rounds
+    )
+
+    # SC-001, SC-003: 20 карточек упражнений — по слову в каждом из четырёх
+    # раундов, и тип меняется только на границе раунда
+    assert shown == len(started) * len(EXERCISE_ROUNDS) == 20
+    assert [r["exercise"] for r in rounds] == list(EXERCISE_ROUNDS)
+    assert all(len(round_["exercises"]) == len(started) for round_ in rounds)
+    assert ExerciseType.INTRO not in {e["type"] for e in _round_exercises(rounds)}
+
+
+def test_learn_finish_releases_a_word_that_passed_every_round(
+    client: TestClient, db_session: Session, words: list[Word]
+):
+    session_id, started = _learn_session(client, 2)
+    answers = _answers_of(words, started)
+    rounds = _rounds(client, started)
+    done, abandoned = started
+
+    # Первое слово проходит все четыре раунда, второе — только первый
+    for index, round_ in enumerate(rounds):
+        for exercise in round_["exercises"]:
+            word_id = exercise["word_id"]
+            if word_id == abandoned and index > 0:
+                continue
+            _answer(
+                client,
+                word_id,
+                round_["exercise"],
+                answers[word_id][round_["exercise"]],
+                mode="learn",
+                session_id=session_id,
+            )
+
+    db_session.expire_all()
+    untouched = db_session.get(Progress, abandoned)
+    snapshot = (untouched.status, untouched.step, untouched.due_at, untouched.updated_at)
+
+    results = _finish(client, session_id, mode="learn")
+
+    # FR-015: слово, прошедшее четыре раунда, выпускается в повторения
+    assert [r["word_id"] for r in results] == [done]
+    assert results[0]["progress"]["status"] == WordStatus.REVIEW
+    assert results[0]["progress"]["repetitions"] == 1
+    assert results[0]["progress"]["interval_days"] == 1.0
+
+    db_session.expire_all()
+    released = db_session.get(Progress, done)
+    assert timedelta(hours=20) < released.due_at - utcnow() < timedelta(hours=28)
+
+    # FR-016: брошенное посреди занятия слово остаётся в изучении
+    after = db_session.get(Progress, abandoned)
+    assert (after.status, after.step, after.due_at, after.updated_at) == snapshot
+
+
+def test_learn_finish_treats_a_mistake_like_a_clean_answer(
+    client: TestClient, db_session: Session, words: list[Word]
+):
+    session_id, started = _learn_session(client, 2)
+    answers = _answers_of(words, started)
+    rounds = _rounds(client, started)
+    stumbled, clean = started
+
+    _play_round(client, session_id, rounds[0], answers, wrong_for=stumbled, mode="learn")
+    for round_ in rounds[1:]:
+        _play_round(client, session_id, round_, answers, mode="learn")
+
+    results = {r["word_id"]: r for r in _finish(client, session_id, mode="learn")}
+
+    # FR-015b, SC-006, SC-007: ошибка уже закрыта верным ответом в том же раунде,
+    # и расписанием её не наказывают — в отличие от повторения
+    assert results[stumbled]["mistakes"] == 1
+    assert results[clean]["mistakes"] == 0
+    for word_id in started:
+        progress = results[word_id]["progress"]
+        assert progress["status"] == WordStatus.REVIEW
+        assert progress["repetitions"] == 1
+        assert progress["interval_days"] == 1.0
+        assert progress["lapses"] == 0
+    assert results[stumbled]["progress"]["ease"] == results[clean]["progress"]["ease"]

@@ -1,4 +1,4 @@
-"""Расписание повторений: шаги знакомства и SM-2."""
+"""Расписание повторений: выпуск слова и SM-2."""
 
 import random
 from datetime import datetime, timedelta
@@ -8,16 +8,16 @@ import pytest
 from app.config import settings
 from app.models import ExerciseType, WordStatus
 from app.srs import (
+    EXERCISE_ROUNDS,
     FIRST_INTERVAL_DAYS,
-    LEARNING_STEPS,
     RELEARN_STEP,
-    REVIEW_ROUNDS,
+    RELEARN_STEPS,
     AttemptOutcome,
     SrsState,
     apply_answer,
     derive_quality,
-    exercise_for,
     force_status,
+    graduate,
     mark_known,
     session_quality,
     start_learning,
@@ -44,19 +44,14 @@ def test_derive_quality(correct, used_hint, attempt, expected):
     assert derive_quality(correct=correct, used_hint=used_hint, attempt=attempt) == expected
 
 
-def test_learning_steps_run_in_order():
+def test_a_word_graduates_after_the_relearn_steps():
+    # Шаг больше не выбирает упражнение, но по-прежнему считает занятия:
+    # столько их проходит слово, откатившееся в изучение после забывания
     state = start_learning(NOW)
-    seen = []
-    for _ in LEARNING_STEPS:
-        seen.append(exercise_for(state))
+    for _ in range(RELEARN_STEPS):
+        assert state.status is WordStatus.LEARNING
         state = apply_answer(state, quality=5, now=NOW, rng=NO_JITTER)
 
-    assert seen == [
-        ExerciseType.INTRO,
-        ExerciseType.CHOICE_RU_EN,
-        ExerciseType.LETTERS,
-        ExerciseType.DICTATION,
-    ]
     assert state.status is WordStatus.REVIEW
 
 
@@ -75,7 +70,7 @@ def test_wrong_answer_on_first_step_stays_at_zero():
 
 
 def test_graduation_schedules_tomorrow():
-    state = SrsState(status=WordStatus.LEARNING, step=len(LEARNING_STEPS) - 1, due_at=NOW)
+    state = SrsState(status=WordStatus.LEARNING, step=RELEARN_STEPS - 1, due_at=NOW)
     state = apply_answer(state, quality=5, now=NOW, rng=NO_JITTER)
 
     assert state.status is WordStatus.REVIEW
@@ -86,7 +81,7 @@ def test_graduation_schedules_tomorrow():
 
 def test_review_intervals_grow():
     state = start_learning(NOW)
-    for _ in LEARNING_STEPS:
+    for _ in range(RELEARN_STEPS):
         state = apply_answer(state, quality=5, now=NOW, rng=NO_JITTER)
 
     intervals = [state.interval_days]
@@ -146,16 +141,32 @@ def test_known_word_is_frozen():
     assert apply_answer(state, quality=2, now=NOW, rng=NO_JITTER) == state
 
 
-def test_review_rounds_are_fixed_and_skip_the_intro_card():
-    # FR-004: порядок раундов задан спецификацией и не зависит от слова
-    assert REVIEW_ROUNDS == (
+def test_exercise_rounds_are_fixed_and_skip_the_intro_card():
+    # FR-006: порядок раундов задан спецификацией, один на оба режима занятия
+    assert EXERCISE_ROUNDS == (
         ExerciseType.CHOICE_RU_EN,
         ExerciseType.CHOICE_EN_RU,
         ExerciseType.LETTERS,
         ExerciseType.DICTATION,
     )
-    # FR-005: знакомому слову карточка-знакомство не показывается
-    assert ExerciseType.INTRO not in REVIEW_ROUNDS
+    # FR-007: карточка-знакомство в раундах не участвует
+    assert ExerciseType.INTRO not in EXERCISE_ROUNDS
+
+
+def test_graduate_releases_a_word_without_touching_the_history():
+    # FR-015b: занятие-изучение выпускает слово независимо от ошибок, поэтому
+    # накопленные ease и lapses выпуск не трогает — наказывает только повторение
+    state = SrsState(
+        status=WordStatus.LEARNING, step=0, ease=2.3, lapses=2, due_at=NOW
+    )
+
+    released = graduate(state, now=NOW, rng=NO_JITTER)
+
+    assert released.status is WordStatus.REVIEW
+    assert released.repetitions == 1
+    assert released.interval_days == FIRST_INTERVAL_DAYS
+    assert released.due_at == NOW + timedelta(days=FIRST_INTERVAL_DAYS)
+    assert (released.ease, released.lapses) == (state.ease, state.lapses)
 
 
 @pytest.mark.parametrize(

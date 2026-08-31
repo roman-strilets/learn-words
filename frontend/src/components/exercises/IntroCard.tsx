@@ -13,27 +13,16 @@ export interface IntroContent {
 
 interface Props {
   content: IntroContent
-  /**
-   * `select` — знакомство с новым словом (кнопки «Уже знаю» / «Изучить»).
-   * `repeat` — слово откатилось на нулевой шаг после ошибки, показываем заново.
-   */
-  variant: 'select' | 'repeat'
-  index?: number
-  total?: number
+  /** Позиция слова в знакомстве и всего слов в занятии — для счётчика */
+  index: number
+  total: number
   onLearn: () => void
-  onKnow?: () => void
+  onKnow: () => void
   locked: boolean
 }
 
-export function IntroCard({
-  content,
-  variant,
-  index,
-  total,
-  onLearn,
-  onKnow,
-  locked,
-}: Props) {
+/** Карточка знакомства: показывает слово целиком и спрашивает, брать ли его. */
+export function IntroCard({ content, index, total, onLearn, onKnow, locked }: Props) {
   const { speak, autoplay, supported } = useSpeech()
 
   useSpeakOnce(content.word, autoplay)
@@ -45,7 +34,6 @@ export function IntroCard({
         onLearn()
       },
       Escape: (event) => {
-        if (!onKnow) return
         event.preventDefault()
         onKnow()
       },
@@ -53,21 +41,15 @@ export function IntroCard({
     !locked,
   )
 
-  const isSelect = variant === 'select'
-
   return (
     <div className="flex flex-col items-center gap-8">
       <header className="flex flex-col items-center gap-3">
         <h1 className="text-center text-5xl font-bold text-ink">
-          {isSelect ? 'Выберите слова для изучения' : 'Запомните слово'}
+          Выберите слова для изучения
         </h1>
-        {isSelect && total ? (
-          <Caption>
-            Слов {(index ?? 0) + 1} из {total}
-          </Caption>
-        ) : (
-          <Caption>Вернёмся к нему ещё раз в этой сессии</Caption>
-        )}
+        <Caption>
+          Слов {index + 1} из {total}
+        </Caption>
       </header>
 
       <article className="w-full max-w-xl rounded-lg border border-hairline px-8 py-7">
@@ -94,18 +76,16 @@ export function IntroCard({
       </article>
 
       <div className="flex items-start gap-4">
-        {isSelect && onKnow ? (
-          <Button
-            variant="secondary"
-            onClick={onKnow}
-            disabled={locked}
-            hotkeyLabel="Кнопка Escape"
-          >
-            Уже знаю
-          </Button>
-        ) : null}
+        <Button
+          variant="secondary"
+          onClick={onKnow}
+          disabled={locked}
+          hotkeyLabel="Кнопка Escape"
+        >
+          Уже знаю
+        </Button>
         <Button onClick={onLearn} disabled={locked} hotkeyLabel="Кнопка Enter">
-          {isSelect ? 'Изучить' : 'Продолжить'}
+          Изучить
           <ChevronIcon className="size-5" />
         </Button>
       </div>

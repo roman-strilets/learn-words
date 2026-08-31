@@ -43,15 +43,6 @@ export interface WordPage {
   offset: number
 }
 
-export interface IntroExercise {
-  type: 'intro'
-  word_id: number
-  word: string
-  translation: string
-  example: string | null
-  example_translation: string | null
-}
-
 export interface ChoiceExercise {
   type: 'choice_ru_en' | 'choice_en_ru'
   word_id: number
@@ -80,11 +71,11 @@ export interface DictationExercise {
   hint: string
 }
 
-export type Exercise =
-  | IntroExercise
-  | ChoiceExercise
-  | LettersExercise
-  | DictationExercise
+/**
+ * Карточка-знакомство сюда не входит: знакомство идёт по слову целиком,
+ * до раундов, и упражнением никогда не приходит.
+ */
+export type Exercise = ChoiceExercise | LettersExercise | DictationExercise
 
 export interface SessionCounts {
   new: number
@@ -93,26 +84,32 @@ export interface SessionCounts {
   in_study: number
 }
 
-/** Раунд занятия-повторения: один тип упражнения на все слова занятия. */
-export interface ReviewRound {
+/**
+ * Раунд занятия: один тип упражнения на все слова занятия.
+ * Раунды одинаково устроены в обоих режимах, поэтому имя без «повторения».
+ */
+export interface ExerciseRound {
   exercise: ExerciseType
   exercises: Exercise[]
 }
 
 export interface SessionPayload {
   mode: StudyMode
-  /** Ключ занятия; заполнен в режиме `review`, когда есть что повторять */
+  /** Ключ занятия; приходит в обоих режимах, когда занятию есть чем заняться */
   session_id: string | null
   /** Заполнено в режиме `learn` */
   new_words: Word[]
-  /** Заполнено в режиме `review`: четыре раунда в фиксированном порядке */
-  rounds: ReviewRound[]
+  /**
+   * Заполнено в режиме `review`: четыре раунда в фиксированном порядке.
+   * План изучения приходит отдельно, из `buildRounds`: его состав известен
+   * только после знакомства.
+   */
+  rounds: ExerciseRound[]
   counts: SessionCounts
 }
 
 export interface SelectResponse {
   progress: Progress
-  next_exercise: Exercise | null
   /** Замена слову, помеченному «уже знаю», чтобы занятие не стало короче */
   replacement: Word | null
 }
@@ -126,8 +123,8 @@ export interface AnswerPayload {
   attempt?: number
   duration_ms?: number
   mode?: StudyMode
-  /** Обязателен при `mode: 'review'` — иначе сервер ответит 422 */
-  session_id?: string
+  /** Обязателен в обоих режимах — иначе сервер ответит 422 */
+  session_id: string
 }
 
 export interface AnswerResponse {
@@ -144,8 +141,11 @@ export interface AnswerResponse {
   progress: Progress
 }
 
-/** Итог одного слова за занятие-повторение, посчитанный сервером по журналу. */
-export interface ReviewFinishResult {
+/**
+ * Итог одного слова за занятие, посчитанный сервером по журналу.
+ * В режиме `learn` `mistakes` информационный: на расписание он не влияет.
+ */
+export interface SessionFinishResult {
   word_id: number
   mistakes: number
   quality: number

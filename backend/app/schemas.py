@@ -91,15 +91,6 @@ class WordPage(BaseModel):
 # ---------------------------------------------------------------------- упражнения
 
 
-class IntroExercise(BaseModel):
-    type: Literal[ExerciseType.INTRO] = ExerciseType.INTRO
-    word_id: int
-    word: str
-    translation: str
-    example: str | None = None
-    example_translation: str | None = None
-
-
 class ChoiceRuEnExercise(BaseModel):
     """Показан русский перевод, надо выбрать английское слово."""
 
@@ -148,8 +139,10 @@ class DictationExercise(BaseModel):
     hint: str
 
 
+# Карточка-знакомство сюда не входит: знакомство идёт по слову целиком,
+# до раундов, и упражнением никогда не приходит (FR-007)
 Exercise = Annotated[
-    IntroExercise | ChoiceRuEnExercise | ChoiceEnRuExercise | LettersExercise | DictationExercise,
+    ChoiceRuEnExercise | ChoiceEnRuExercise | LettersExercise | DictationExercise,
     Field(discriminator="type"),
 ]
 
@@ -171,8 +164,11 @@ class SessionCounts(BaseModel):
     in_study: int
 
 
-class ReviewRound(BaseModel):
-    """Раунд занятия-повторения: один тип упражнения на все слова занятия."""
+class ExerciseRound(BaseModel):
+    """Раунд занятия: один тип упражнения на все слова занятия.
+
+    Раунды одинаково устроены в обоих режимах, поэтому в имени нет ни
+    «повторения», ни «изучения»."""
 
     exercise: ExerciseType
     exercises: list[Exercise]
@@ -181,15 +177,26 @@ class ReviewRound(BaseModel):
 class SessionOut(BaseModel):
     """Стартовый набор сессии. Заполнена ровно одна из категорий: в режиме
     `learn` — новые слова на знакомство, в режиме `review` — план из раундов.
+    План изучения приходит отдельно, из `POST /study/rounds`: до конца
+    знакомства неизвестно, какие слова в занятии останутся.
 
-    `session_id` выдаётся только для повторения: это не серверное состояние,
-    а ключ, по которому попытки занятия находят друг друга в `review_log`."""
+    `session_id` выдаётся в обоих режимах, когда занятию есть чем заняться:
+    это не серверное состояние, а ключ, по которому попытки занятия находят
+    друг друга в `review_log`."""
 
     mode: SessionMode
     session_id: str | None = None
     new_words: list[WordOut]
-    rounds: list[ReviewRound] = Field(default_factory=list)
+    rounds: list[ExerciseRound] = Field(default_factory=list)
     counts: SessionCounts
+
+
+class RoundsRequest(BaseModel):
+    """Слова, взятые в изучение по итогам знакомства.
+
+    Пустой список — не ошибка: все слова могли оказаться уже знакомыми."""
+
+    word_ids: list[int] = Field(default_factory=list)
 
 
 class SelectRequest(BaseModel):
@@ -201,7 +208,6 @@ class SelectRequest(BaseModel):
 
 class SelectResponse(BaseModel):
     progress: ProgressOut
-    next_exercise: Exercise | None = None
     # Замена слову, помеченному «уже знаю», чтобы занятие осталось прежнего размера
     replacement: WordOut | None = None
 
@@ -218,13 +224,14 @@ class AnswerRequest(BaseModel):
     session_id: str | None = None
 
     @model_validator(mode="after")
-    def _session_id_required_for_review(self) -> AnswerRequest:
+    def _session_id_is_required(self) -> AnswerRequest:
         # Проверка на модели, а не на поле: пропущенный `session_id` берётся
         # из значения по умолчанию, а полевой валидатор на умолчание не зовут.
-        # Без ключа занятия ответ повторения некуда записать, и `finish`
-        # потом не соберёт итог — отказываем сразу, а не молча теряем попытку.
-        if self.mode is SessionMode.REVIEW and not self.session_id:
-            raise ValueError("session_id обязателен в режиме review")
+        # Ключа занятия требуют оба режима: итог занятия сервер выводит из
+        # журнала, и попытку без ключа он не найдёт — отказываем сразу,
+        # а не теряем её молча.
+        if not self.session_id:
+            raise ValueError("session_id обязателен")
         return self
 
 
@@ -242,12 +249,19 @@ class AnswerResponse(BaseModel):
     progress: ProgressOut
 
 
-class ReviewFinishRequest(BaseModel):
+class SessionFinishRequest(BaseModel):
     session_id: str
+    # Как выводить итог: повторение — по худшей попытке, изучение выпускает
+    # слово независимо от ошибок. Из данных режим не вывести: слова в статусе
+    # learning встречаются и в занятии-повторении, куда попадают после забывания
+    mode: SessionMode
 
 
-class ReviewFinishResult(BaseModel):
-    """Итог одного слова за занятие-повторение: что сервер вывел из журнала."""
+class SessionFinishResult(BaseModel):
+    """Итог одного слова за занятие: что сервер вывел из журнала.
+
+    В режиме `learn` `mistakes` остаётся информационным — на расписание он
+    не влияет."""
 
     word_id: int
     mistakes: int
