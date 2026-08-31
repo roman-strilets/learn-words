@@ -102,5 +102,9 @@ def test_import_keeps_meanings_entered_by_hand(tmp_path, db_session: Session):
 
     assert report.created == 0
     assert report.merged == 0
-    rows = db_session.scalars(select(Word).where(Word.word_key == "roll out")).all()
+    # Порядок задаём явно: без ORDER BY SQLite волен вернуть строки в любом
+    # порядке, и проверка «значения не слились» превращалась в подбрасывание монеты
+    rows = db_session.scalars(
+        select(Word).where(Word.word_key == "roll out").order_by(Word.id)
+    ).all()
     assert [r.translation for r in rows] == ["вылезать", "внедрить"]
