@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import random
 import re
-import string
 import unicodedata
 
 from rapidfuzz.distance import Levenshtein
@@ -26,8 +25,6 @@ from app.schemas import (
 
 OPTIONS_COUNT = 4
 DISTRACTOR_POOL = 12
-SHORT_WORD_LEN = 5
-EXTRA_LETTERS_FOR_SHORT = 2
 
 # Артикли и частица `to` отбрасываются с обеих сторон сравнения:
 # «to budge» и «budge» — один и тот же ответ.
@@ -84,11 +81,8 @@ def build_mask(word: str) -> str:
 
 
 def build_letter_bank(word: str, rng: random.Random) -> list[str]:
-    """Буквы ответа плюс лишние для коротких слов, в перемешанном порядке."""
+    """Буквы ответа — и только они — в перемешанном порядке."""
     letters = [ch.upper() for ch in word if ch.isalnum()]
-    if len(letters) <= SHORT_WORD_LEN:
-        alphabet = [c for c in string.ascii_uppercase if c not in letters]
-        letters += rng.sample(alphabet, k=min(EXTRA_LETTERS_FOR_SHORT, len(alphabet)))
     rng.shuffle(letters)
     return letters
 

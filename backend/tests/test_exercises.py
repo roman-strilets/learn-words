@@ -68,11 +68,9 @@ def test_letter_bank_contains_all_answer_letters():
     assert sorted(letters) == sorted("GOAFTER")
 
 
-def test_short_words_get_extra_letters():
-    letters = build_letter_bank("budge", random.Random(1))
-    assert len(letters) == len("budge") + 2
-    for char in "BUDGE":
-        assert char in letters
+def test_short_words_get_no_extra_letters():
+    letters = build_letter_bank("flock", random.Random(1))
+    assert sorted(letters) == sorted("FLOCK")
 
 
 def test_letter_bank_order_is_stable_for_same_seed():
