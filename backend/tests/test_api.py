@@ -590,6 +590,31 @@ def test_review_session_is_a_plan_of_four_rounds(client: TestClient, words: list
         assert {e["type"] for e in round_["exercises"]} == {round_["exercise"]}
 
 
+def _orders(rounds: list[dict]) -> list[list[int]]:
+    """Порядок слов в каждом раунде плана."""
+    return [[e["word_id"] for e in round_["exercises"]] for round_ in rounds]
+
+
+def _assert_rounds_reshuffled(orders: list[list[int]], words: list[int]) -> None:
+    """Гарантии порядка из контракта плана: FR-003, FR-004, FR-006."""
+    for order in orders:
+        assert sorted(order) == sorted(words)
+    for k in range(1, len(orders)):
+        # FR-003: порядок раунда не повторяет предыдущий
+        assert orders[k] != orders[k - 1]
+        # FR-004: на стыке раундов одно слово не идёт дважды подряд
+        if len(words) >= 3:
+            assert orders[k][0] != orders[k - 1][-1]
+
+
+def test_review_rounds_differ_in_order(client: TestClient, words: list[Word]):
+    started = _start(client)
+
+    # План случайный: гарантии проверяем на нескольких планах подряд
+    for _ in range(20):
+        _assert_rounds_reshuffled(_orders(_session(client, "review")["rounds"]), started)
+
+
 def test_review_session_is_empty_without_due_words(client: TestClient, words: list[Word]):
     body = _session(client, "review")
 
@@ -828,7 +853,8 @@ def test_learn_rounds_cover_every_word_in_every_type(client: TestClient, words: 
     assert [r["exercise"] for r in rounds] == list(EXERCISE_ROUNDS)
     for round_ in rounds:
         # В раунде — по одному упражнению своего типа на каждое слово занятия
-        assert [e["word_id"] for e in round_["exercises"]] == started
+        # FR-006: каждое слово ровно по разу, но порядок у раунда свой
+        assert sorted(e["word_id"] for e in round_["exercises"]) == sorted(started)
         assert {e["type"] for e in round_["exercises"]} == {round_["exercise"]}
     # FR-007: карточка-знакомство в раунды не попадает
     assert ExerciseType.INTRO not in {e["type"] for e in _round_exercises(rounds)}
@@ -848,11 +874,23 @@ def test_learn_rounds_skip_words_that_left_the_rotation(client: TestClient, word
     # FR-020: слово могли вывести из оборота между знакомством и планом раундов
     assert [r["exercise"] for r in rounds] == list(EXERCISE_ROUNDS)
     for round_ in rounds:
-        assert [e["word_id"] for e in round_["exercises"]] == alive
+        assert sorted(e["word_id"] for e in round_["exercises"]) == sorted(alive)
 
     for word_id in alive:
         client.put(f"/api/words/{word_id}/status", json={"status": WordStatus.KNOWN})
     assert _rounds(client, started) == []
+
+
+def test_learn_rounds_differ_in_order(client: TestClient, words: list[Word]):
+    _, started = _learn_session(client)
+
+    for _ in range(20):
+        _assert_rounds_reshuffled(_orders(_rounds(client, started)), started)
+
+    # FR-005: у двух слов второй порядок один — раунды чередуют два порядка
+    pair = _orders(_rounds(client, started[:2]))
+    for k in range(1, len(pair)):
+        assert pair[k] == pair[k - 1][::-1]
 
 
 def test_learn_answer_logs_the_attempt_without_touching_the_schedule(

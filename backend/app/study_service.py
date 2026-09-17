@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.exercises import build_exercise, check_answer, correct_answer_for
+from app.exercises import build_exercise, check_answer, correct_answer_for, order_round
 from app.models import ExerciseType, Progress, ReviewLog, Word, WordStatus
 from app.schemas import (
     AnswerRequest,
@@ -193,27 +193,39 @@ def build_session(
 def _rounds_for(
     session: Session, words: Sequence[Word], rng: random.Random
 ) -> list[ExerciseRound]:
-    """Раунды по типам упражнений: в каждом — по карточке на каждое слово."""
+    """Раунды по типам упражнений: в каждом — по карточке на каждое слово.
+
+    Порядок слов у каждого раунда свой и не повторяет предыдущий, иначе слова
+    запоминаются по месту в очереди; при трёх словах и больше раунд
+    не начинается со слова, которым кончился предыдущий. План общий для повторения
+    и `/study/rounds`, так что правило действует в обоих режимах.
+    """
     if not words:
         return []
-    return [
-        ExerciseRound(
-            exercise=exercise_type,
-            exercises=[
-                build_exercise(
-                    session,
-                    word,
-                    exercise_type,
-                    # Банк букв даём и на повторении: подсказка внизу карточки
-                    # обещает выбор мышью, а кто хочет сложнее — жмёт «Скрыть буквы»
-                    show_letters=True,
-                    rng=rng,
-                )
-                for word in words
-            ],
+    rounds: list[ExerciseRound] = []
+    previous: list[Word] | None = None
+    for exercise_type in EXERCISE_ROUNDS:
+        last = previous[-1] if previous else None
+        ordered = order_round(words, previous, last, rng, key=lambda w: w.id)
+        rounds.append(
+            ExerciseRound(
+                exercise=exercise_type,
+                exercises=[
+                    build_exercise(
+                        session,
+                        word,
+                        exercise_type,
+                        # Банк букв даём и на повторении: подсказка внизу карточки
+                        # обещает выбор мышью, а кто хочет сложнее — жмёт «Скрыть буквы»
+                        show_letters=True,
+                        rng=rng,
+                    )
+                    for word in ordered
+                ],
+            )
         )
-        for exercise_type in EXERCISE_ROUNDS
-    ]
+        previous = ordered
+    return rounds
 
 
 def build_rounds(

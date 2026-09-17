@@ -9,6 +9,7 @@ from __future__ import annotations
 import random
 import re
 import unicodedata
+from collections.abc import Callable, Hashable, Sequence
 
 from rapidfuzz.distance import Levenshtein
 from sqlalchemy import func, or_, select
@@ -25,6 +26,13 @@ from app.schemas import (
 
 OPTIONS_COUNT = 4
 DISTRACTOR_POOL = 12
+
+# Границы для порядка слов в раунде. Это не настройки, а следствие требований:
+# одно слово переставлять некуда, а «не начинать с последнего слова» при двух
+# словах противоречит «не повторять порядок» (FR-003, FR-004), поэтому
+# в `app/config.py` они не выносятся.
+MIN_WORDS_TO_REORDER = 2
+MIN_WORDS_TO_AVOID_REPEAT = 3
 
 # Артикли и частица `to` отбрасываются с обеих сторон сравнения:
 # «to budge» и «budge» — один и тот же ответ.
@@ -85,6 +93,53 @@ def build_letter_bank(word: str, rng: random.Random) -> list[str]:
     letters = [ch.upper() for ch in word if ch.isalnum()]
     rng.shuffle(letters)
     return letters
+
+
+def order_round[T](
+    items: Sequence[T],
+    previous: Sequence[T] | None,
+    last: T | None,
+    rng: random.Random,
+    key: Callable[[T], Hashable] = lambda x: x,
+) -> list[T]:
+    """Случайный порядок слов раунда, не похожий на предыдущий раунд.
+
+    Порядок отличается от `previous`, а при трёх словах и больше не начинается
+    с `last` — слова, показанного последним. У двух слов второй порядок один,
+    и он начинается с последнего слова: тогда важнее не повторить порядок.
+    Для первого раунда (`previous is None`) — просто перемешивание.
+
+    Вместо перемешивания «до удачи» перебираем четыре кандидата, и их всегда
+    хватает. Пусть `q` — перемешанный порядок, `x = last`:
+    - `q[0] == x`: обмен первых двух и сдвиг влево начинаются с `q[1] != x`
+      и различны между собой, так что с `previous` совпадёт не больше одного;
+    - `q[0] != x`, но `q == previous`: обмен 2-го и 3-го сохраняет начало
+      и отличается от `q`, а значит и от `previous`;
+    - два слова: обмен первых двух — единственный другой порядок.
+    """
+    shuffled = list(items)
+    rng.shuffle(shuffled)
+    if previous is None or len(shuffled) < MIN_WORDS_TO_REORDER:
+        return shuffled
+
+    previous_keys = [key(x) for x in previous]
+    avoid_start = len(shuffled) >= MIN_WORDS_TO_AVOID_REPEAT and last is not None
+
+    for candidate in _round_candidates(shuffled):
+        if [key(x) for x in candidate] == previous_keys:
+            continue
+        if avoid_start and key(candidate[0]) == key(last):
+            continue
+        return candidate
+    raise AssertionError("order_round: ни один кандидат не подошёл — ошибка в переборе")
+
+
+def _round_candidates[T](q: list[T]) -> list[list[T]]:
+    """Перемешанный порядок и три его запасные перестановки — ровно в этом порядке."""
+    candidates = [q, [q[1], q[0], *q[2:]], [*q[1:], q[0]]]
+    if len(q) >= MIN_WORDS_TO_AVOID_REPEAT:
+        candidates.append([q[0], q[2], q[1], *q[3:]])
+    return candidates
 
 
 def _stable_rng(word_id: int, attempt: int) -> random.Random:

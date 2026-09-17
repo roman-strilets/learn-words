@@ -9,6 +9,7 @@ import type {
   ExerciseType,
   StudyMode,
 } from '../api/types'
+import { arrangeRound } from '../lib/roundOrder'
 import { ExerciseView } from './exercises/ExerciseView'
 import { Feedback } from './exercises/Feedback'
 import type { AnswerSubmit } from './exercises/types'
@@ -43,10 +44,24 @@ function isGone(error: unknown): boolean {
  * Расписание внутри занятия не двигается — его пересчитывает `finishSession`
  * один раз, в конце, по журналу занятия. Изучение и повторение расходятся
  * только в том, как сервер выводит итог, — очередь у них общая.
+ *
+ * Порядок слов в раундах перемешивает сервер, но он знает только план.
+ * На границе раунда порядок поправляется под то, что показано на самом деле:
+ * выбывшее слово может сделать два разных серверных порядка одинаковыми
+ * (`[a, b, c]` и `[a, c, b]` без `c`).
  */
 export function RoundsRunner({ rounds, sessionId, mode, onFinished }: Props) {
   const [roundIndex, setRoundIndex] = useState(0)
   const [queue, setQueue] = useState<Exercise[]>(() => rounds[0]?.exercises ?? [])
+  // Порядок первых показов текущего раунда — так, как он показан.
+  // Повторы после ошибки сюда не попадают: они не меняют порядок раунда.
+  const [roundOrder, setRoundOrder] = useState<number[]>(
+    () => rounds[0]?.exercises.map((e) => e.word_id) ?? [],
+  )
+  // Слово последней отвеченной карточки. Сервер знает только запланированный
+  // конец раунда, а последним мог оказаться повтор после ошибки (FR-004).
+  // Выбывшее слово здесь может остаться: в следующем раунде его всё равно нет.
+  const [lastWordId, setLastWordId] = useState<number | null>(null)
   const [feedback, setFeedback] = useState<AnswerResponse | null>(null)
   const [tally, setTally] = useState({ answered: 0, correct: 0 })
   // Номер показа слова в текущем раунде: 1 на первом показе, +1 на каждый
@@ -100,6 +115,7 @@ export function RoundsRunner({ rounds, sessionId, mode, onFinished }: Props) {
 
   const advance = useCallback(() => {
     const repeat = feedback?.next_exercise ?? null
+    if (current) setLastWordId(current.word_id)
     setQueue((items) => {
       const rest = items.slice(1)
       // Повтор встаёт после остальных карточек раунда, а не сразу (FR-009)
@@ -114,7 +130,7 @@ export function RoundsRunner({ rounds, sessionId, mode, onFinished }: Props) {
     setFeedback(null)
     setCardId((id) => id + 1)
     submitting.current = false
-  }, [feedback])
+  }, [feedback, current])
 
   // Раунд закончился — берём следующий и начинаем счёт показов заново (FR-010)
   useEffect(() => {
@@ -125,11 +141,17 @@ export function RoundsRunner({ rounds, sessionId, mode, onFinished }: Props) {
       const gone = new Set(dropped)
       setRoundIndex(next)
       setShows({})
-      setQueue(rounds[next].exercises.filter((item) => !gone.has(item.word_id)))
+      const arranged = arrangeRound(
+        rounds[next].exercises.filter((item) => !gone.has(item.word_id)),
+        roundOrder.filter((id) => !gone.has(id)),
+        lastWordId,
+      )
+      setQueue(arranged)
+      setRoundOrder(arranged.map((item) => item.word_id))
       return
     }
     setFinished(true)
-  }, [feedback, queue.length, finished, roundIndex, rounds, dropped])
+  }, [feedback, queue.length, finished, roundIndex, rounds, dropped, roundOrder, lastWordId])
 
   // Все раунды пройдены: расписание пересчитывается один раз, на сервере
   const finish = finishMutation.mutate

@@ -1,6 +1,7 @@
 """Генерация упражнений, подбор дистракторов и проверка ответов."""
 
 import random
+from collections import Counter
 
 import pytest
 from sqlalchemy.orm import Session
@@ -11,6 +12,7 @@ from app.exercises import (
     build_mask,
     check_answer,
     normalize_answer,
+    order_round,
     pick_distractor_words,
     translation_variants,
     word_key_for,
@@ -77,6 +79,87 @@ def test_letter_bank_order_is_stable_for_same_seed():
     assert build_letter_bank("scrutiny", random.Random(7)) == build_letter_bank(
         "scrutiny", random.Random(7)
     )
+
+
+# ------------------------------------------------------------ порядок раунда
+
+
+class _NoShuffle(random.Random):
+    """Перемешивание, которое ничего не меняет: так запасные кандидаты срабатывают наверняка."""
+
+    def shuffle(self, x) -> None:  # noqa: ARG002
+        return None
+
+
+@pytest.mark.parametrize("items", [[], [7]])
+def test_order_round_keeps_zero_or_one_item_as_is(items: list[int]):
+    assert order_round(items, items, items[-1] if items else None, random.Random(0)) == items
+
+
+@pytest.mark.parametrize("n", [2, 3, 5])
+@pytest.mark.parametrize("seed", range(200))
+def test_order_round_differs_from_previous_and_avoids_last(n: int, seed: int):
+    previous = list(range(n))
+
+    result = order_round(previous, previous, previous[-1], random.Random(seed))
+
+    assert sorted(result) == previous
+    # FR-003: порядок раунда не повторяет предыдущий
+    assert result != previous
+    # FR-004: при 3 словах и больше раунд не начинается с последнего слова
+    if n >= 3:
+        assert result[0] != previous[-1]
+
+
+def test_order_round_with_two_items_prefers_a_new_order_over_a_new_start():
+    # FR-005: у двух слов второй порядок один, и он начинается с последнего слова
+    for seed in range(50):
+        assert order_round([0, 1], [0, 1], 1, random.Random(seed)) == [1, 0]
+
+
+@pytest.mark.parametrize(
+    ("items", "previous", "last", "expected"),
+    [
+        # Перемешанный порядок совпал с предыдущим раундом — меняем 1-е и 2-е
+        ([0, 1, 2], [0, 1, 2], 2, [1, 0, 2]),
+        # Начинается с последнего слова — меняем 1-е и 2-е
+        ([2, 0, 1], [0, 1, 2], 2, [0, 2, 1]),
+        # Обмен 1-го и 2-го дал бы предыдущий порядок — берём сдвиг
+        ([2, 0, 1], [0, 2, 1], 2, [0, 1, 2]),
+        # Совпал с предыдущим, а обмен и сдвиг начались бы с последнего — меняем 2-е и 3-е
+        ([0, 2, 1], [0, 2, 1], 2, [0, 1, 2]),
+    ],
+)
+def test_order_round_falls_back_to_the_next_candidate(
+    items: list[int], previous: list[int], last: int, expected: list[int]
+):
+    assert order_round(items, previous, last, _NoShuffle()) == expected
+
+
+def test_order_round_compares_by_key():
+    items = [{"id": 1}, {"id": 2}, {"id": 3}]
+    previous = [dict(item) for item in items]
+
+    result = order_round(items, previous, previous[-1], _NoShuffle(), key=lambda x: x["id"])
+
+    assert [x["id"] for x in result] == [2, 1, 3]
+    assert [x["id"] for x in items] == [1, 2, 3]
+
+
+def test_first_round_is_a_plain_shuffle():
+    rng = random.Random(3)
+    results = {tuple(order_round([0, 1, 2], None, None, rng)) for _ in range(200)}
+    # Первый раунд ничем не ограничен: встречаются все шесть порядков
+    assert len(results) == 6
+
+
+def test_first_round_puts_every_item_first_equally_often():
+    # SC-003: на первом месте каждое слово оказывается примерно в пятой части занятий
+    rng = random.Random(0)
+    firsts = Counter(order_round(list(range(5)), None, None, rng)[0] for _ in range(1_000))
+
+    assert set(firsts) == set(range(5))
+    assert all(150 <= count <= 250 for count in firsts.values())
 
 
 def test_translation_variants_splits_merged_translation():
