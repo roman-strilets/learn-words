@@ -1,8 +1,10 @@
 import type {
   AnswerPayload,
+  AppSettings,
   AnswerResponse,
   DailyStat,
   ExerciseRound,
+  Label,
   SelectResponse,
   SessionFinishResult,
   SessionPayload,
@@ -84,12 +86,17 @@ export const api = {
   listWords: (params: {
     search?: string
     status?: string
+    priority?: boolean
+    /** id метки или `none` — слова без меток */
+    label?: number | 'none'
     limit?: number
     offset?: number
   }) => {
     const query = new URLSearchParams()
     if (params.search) query.set('search', params.search)
     if (params.status) query.set('status', params.status)
+    if (params.priority) query.set('priority', 'true')
+    if (params.label !== undefined) query.set('label', String(params.label))
     query.set('limit', String(params.limit ?? 50))
     query.set('offset', String(params.offset ?? 0))
     return request<WordPage>(`/words?${query.toString()}`)
@@ -114,10 +121,43 @@ export const api = {
       body: JSON.stringify({ status }),
     }),
 
+  // Поднять новое слово в очереди «Изучения»; слову в изучении сервер ответит 409
+  setWordPriority: ({ id, priority }: { id: number; priority: boolean }) =>
+    request<WordWithProgress>(`/words/${id}/priority`, {
+      method: 'PUT',
+      body: JSON.stringify({ priority }),
+    }),
+
   deleteWord: (wordId: number) =>
     request<void>(`/words/${wordId}`, { method: 'DELETE' }),
+
+  listLabels: () => request<Label[]>('/labels'),
+
+  createLabel: (name: string) =>
+    request<Label>('/labels', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+
+  renameLabel: ({ id, name }: { id: number; name: string }) =>
+    request<Label>(`/labels/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    }),
+
+  // Метка снимается со всех слов; слова и прогресс не меняются
+  deleteLabel: (labelId: number) =>
+    request<void>(`/labels/${labelId}`, { method: 'DELETE' }),
 
   overview: () => request<StatsOverview>('/stats/overview'),
 
   daily: (days = 30) => request<DailyStat[]>(`/stats/daily?days=${days}`),
+
+  getSettings: () => request<AppSettings>('/settings'),
+
+  updateSettings: (payload: AppSettings) =>
+    request<AppSettings>('/settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
 }

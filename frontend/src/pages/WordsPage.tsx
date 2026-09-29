@@ -6,7 +6,7 @@ import { api } from '../api/client'
 import type { WordStatusValue, WordWithProgress } from '../api/types'
 import { STATUS_CLASS, STATUS_LABEL, formatDue } from '../lib/format'
 import { ErrorBox, Spinner } from '../components/ui'
-import { SpeakerIcon } from '../components/icons'
+import { ArrowUpIcon, SpeakerIcon } from '../components/icons'
 import { WordForm } from '../components/WordForm'
 import { useSpeech } from '../speech/SpeechProvider'
 
@@ -58,15 +58,31 @@ export function WordsPage() {
   const { speak, supported } = useSpeech()
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState('')
+  // Фильтр поднятых слов не статус: он включается вместе со статусным, а не вместо него
+  const [priorityOnly, setPriorityOnly] = useState(false)
+  // Одно значение за раз: метка по id или «Без меток»; '' — фильтр выключен
+  const [label, setLabel] = useState<number | 'none' | ''>('')
   const [page, setPage] = useState(0)
   const [editingId, setEditingId] = useState<number | null>(null)
 
+  const { data: labels } = useQuery({ queryKey: ['labels'], queryFn: api.listLabels })
+
+  // Выбранную метку удалили на вкладке «Метки» — фильтр по ней больше не имеет
+  // смысла, возвращаемся ко всем словам. Правка состояния прямо в рендере:
+  // эффект показал бы пустую страницу на один кадр
+  if (typeof label === 'number' && labels && !labels.some((item) => item.id === label)) {
+    setLabel('')
+    setPage(0)
+  }
+
   const { data, isLoading, error } = useQuery({
-    queryKey: ['words', search, status, page],
+    queryKey: ['words', search, status, priorityOnly, label, page],
     queryFn: () =>
       api.listWords({
         search: search || undefined,
         status: status || undefined,
+        priority: priorityOnly || undefined,
+        label: label === '' ? undefined : label,
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
       }),
@@ -75,9 +91,12 @@ export function WordsPage() {
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['words'] })
     queryClient.invalidateQueries({ queryKey: ['overview'] })
+    // Правка может завести новые метки, правка и удаление меняют счётчики
+    queryClient.invalidateQueries({ queryKey: ['labels'] })
   }
 
   const statusMutation = useMutation({ mutationFn: api.setWordStatus, onSuccess: invalidate })
+  const priorityMutation = useMutation({ mutationFn: api.setWordPriority, onSuccess: invalidate })
   const deleteMutation = useMutation({ mutationFn: api.deleteWord, onSuccess: invalidate })
   const updateMutation = useMutation({
     mutationFn: api.updateWord,
@@ -109,7 +128,9 @@ export function WordsPage() {
   }
 
   // Ошибка правки живёт в самой форме, остальные показываем над таблицей
-  const rowError = (statusMutation.error ?? deleteMutation.error) as Error | null
+  const rowError = (statusMutation.error ??
+    priorityMutation.error ??
+    deleteMutation.error) as Error | null
 
   return (
     <div className="flex w-full max-w-4xl flex-col gap-6">
@@ -148,6 +169,40 @@ export function WordsPage() {
               {filter.label}
             </button>
           ))}
+          <button
+            type="button"
+            onClick={() => {
+              setPriorityOnly((value) => !value)
+              setPage(0)
+            }}
+            aria-pressed={priorityOnly}
+            className={`flex items-center gap-1 rounded px-3 py-2 text-sm transition-colors ${
+              priorityOnly ? 'bg-accent text-white' : 'bg-panel text-ink-soft hover:bg-hairline'
+            }`}
+          >
+            <ArrowUpIcon className="size-4" />
+            Учить первыми
+          </button>
+          <select
+            value={label}
+            onChange={(event) => {
+              const value = event.target.value
+              setLabel(value === '' || value === 'none' ? value : Number(value))
+              setPage(0)
+            }}
+            aria-label="Фильтр по метке"
+            className={`rounded px-3 py-2 text-sm outline-none ${
+              label === '' ? 'bg-panel text-ink-soft' : 'bg-accent text-white'
+            }`}
+          >
+            <option value="">Все метки</option>
+            <option value="none">Без меток</option>
+            {labels?.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -201,7 +256,50 @@ export function WordsPage() {
                             >
                               <SpeakerIcon className="size-5" />
                             </button>
+                            {/* Поднять можно только новое слово: у слова в изучении
+                                кнопки нет, поэтому до ответа 409 дело не доходит */}
+                            {word.progress ? null : (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  priorityMutation.mutate({
+                                    id: word.id,
+                                    priority: !word.priority,
+                                  })
+                                }
+                                disabled={
+                                  priorityMutation.isPending &&
+                                  priorityMutation.variables?.id === word.id
+                                }
+                                aria-pressed={word.priority}
+                                title={word.priority ? 'Не поднимать' : 'Учить первым'}
+                                aria-label={
+                                  word.priority
+                                    ? `Не поднимать «${word.word}»`
+                                    : `Учить «${word.word}» первым`
+                                }
+                                className={`transition-colors disabled:opacity-30 ${
+                                  word.priority ? 'text-accent' : 'text-muted hover:text-accent'
+                                }`}
+                              >
+                                <ArrowUpIcon className="size-5" />
+                              </button>
+                            )}
                           </span>
+                          {/* Метки только показываются: меняются они в «Изменить»,
+                              вместе с остальной правкой слова */}
+                          {word.labels.length ? (
+                            <span className="mt-1 flex flex-wrap gap-1">
+                              {word.labels.map((item) => (
+                                <span
+                                  key={item.id}
+                                  className="rounded bg-panel px-2 py-0.5 text-sm text-ink-soft"
+                                >
+                                  {item.name}
+                                </span>
+                              ))}
+                            </span>
+                          ) : null}
                         </td>
                         <td className="py-3 pr-4 text-ink-soft">{word.translation}</td>
                         <td className="py-3 pr-4">

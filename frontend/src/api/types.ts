@@ -13,6 +13,19 @@ export type WordStatusValue = WordStatus | 'new'
 /** Что делаем на занятии: знакомимся с новыми словами или повторяем изученные. */
 export type StudyMode = 'learn' | 'review'
 
+/** Метка в составе слова. */
+export interface LabelRef {
+  id: number
+  name: string
+}
+
+/** Метка в общем списке: счётчик нужен списку и подтверждению удаления. */
+export interface Label {
+  id: number
+  name: string
+  word_count: number
+}
+
 export interface Word {
   id: number
   word: string
@@ -20,6 +33,10 @@ export interface Word {
   example: string | null
   example_translation: string | null
   created_at: string
+  /** «Учить первым»: бывает только у нового слова и снимается, когда оно уходит в изучение */
+  priority: boolean
+  /** По названию без учёта регистра, «ё» = «е»; `[]` у слова без меток */
+  labels: LabelRef[]
 }
 
 export interface Progress {
@@ -178,4 +195,20 @@ export interface WordInput {
   translation: string
   example?: string | null
   example_translation?: string | null
+  /**
+   * Названия, а не id: новые метки создаются вместе со словом. В правке
+   * отсутствие поля не меняет метки, `[]` снимает все.
+   */
+  labels?: string[]
+}
+
+/**
+ * В каком порядке «Изучение» берёт новые слова. На «Повторение» не влияет:
+ * там слова идут по сроку.
+ */
+export type NewWordsOrder = 'oldest_first' | 'newest_first'
+
+/** Настройки приложения, которые хранятся на сервере, а не в браузере. */
+export interface AppSettings {
+  new_words_order: NewWordsOrder
 }

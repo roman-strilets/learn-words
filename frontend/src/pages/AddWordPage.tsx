@@ -19,6 +19,8 @@ export function AddWordPage() {
       setFormKey((value) => value + 1)
       queryClient.invalidateQueries({ queryKey: ['words'] })
       queryClient.invalidateQueries({ queryKey: ['overview'] })
+      // Слово могло прийти с новыми метками, и у старых сменился счётчик
+      queryClient.invalidateQueries({ queryKey: ['labels'] })
     },
   })
 

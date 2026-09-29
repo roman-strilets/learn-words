@@ -2,11 +2,24 @@ import { useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 
 import type { Word, WordInput } from '../api/types'
+import { LabelPicker } from './LabelPicker'
 import { ErrorBox, TextField } from './ui'
 
-const EMPTY = { word: '', translation: '', example: '', example_translation: '' }
+type Values = {
+  word: string
+  translation: string
+  example: string
+  example_translation: string
+  labels: string[]
+}
 
-type Values = typeof EMPTY
+const EMPTY: Values = {
+  word: '',
+  translation: '',
+  example: '',
+  example_translation: '',
+  labels: [],
+}
 
 function valuesOf(word: Word | undefined): Values {
   if (!word) return EMPTY
@@ -15,6 +28,7 @@ function valuesOf(word: Word | undefined): Values {
     translation: word.translation,
     example: word.example ?? '',
     example_translation: word.example_translation ?? '',
+    labels: word.labels.map((label) => label.name),
   }
 }
 
@@ -49,7 +63,7 @@ export function WordForm({
 }) {
   const [form, setForm] = useState(() => valuesOf(word))
 
-  const update = (field: keyof Values) => (value: string) =>
+  const update = (field: Exclude<keyof Values, 'labels'>) => (value: string) =>
     setForm((current) => ({ ...current, [field]: value }))
 
   const submit = (event: FormEvent) => {
@@ -59,6 +73,7 @@ export function WordForm({
       translation: form.translation,
       example: form.example || null,
       example_translation: form.example_translation || null,
+      labels: form.labels,
     })
   }
 
@@ -95,6 +110,12 @@ export function WordForm({
         value={form.example_translation}
         onChange={update('example_translation')}
       />
+      <div className={wide}>
+        <LabelPicker
+          value={form.labels}
+          onChange={(labels) => setForm((current) => ({ ...current, labels }))}
+        />
+      </div>
 
       {error ? (
         <div className={wide}>

@@ -14,11 +14,12 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.exercises import build_exercise, check_answer, correct_answer_for, order_round
-from app.models import ExerciseType, Progress, ReviewLog, Word, WordStatus
+from app.models import ExerciseType, Progress, ReviewLog, Setting, Word, WordStatus
 from app.schemas import (
     AnswerRequest,
     AnswerResponse,
     ExerciseRound,
+    NewWordsOrder,
     ProgressOut,
     SelectResponse,
     SessionCounts,
@@ -42,9 +43,16 @@ from app.srs import (
 
 ACTIVE_STATUSES = (WordStatus.LEARNING.value, WordStatus.REVIEW.value)
 
+# Ключ порядка новых слов в таблице `settings`
+NEW_WORDS_ORDER_KEY = "new_words_order"
+
 
 class WordNotInStudyError(Exception):
     """Слово ещё не взято в изучение — отвечать на упражнение по нему нельзя."""
+
+
+class WordNotNewError(Exception):
+    """Поднять в очереди можно только новое слово — у этого уже есть прогресс."""
 
 
 # ------------------------------------------------------- перекладывание состояния
@@ -76,17 +84,53 @@ def write_state(progress: Progress, state: SrsState, now: datetime) -> None:
 # ------------------------------------------------------------------------ запросы
 
 
-def new_words_query(limit: int, exclude_ids: Sequence[int] = ()):
-    """Слова, которых ещё нет в изучении, в порядке появления в словаре."""
+def new_words_query(
+    limit: int,
+    exclude_ids: Sequence[int] = (),
+    order: NewWordsOrder = NewWordsOrder.OLDEST_FIRST,
+):
+    """Слова, которых ещё нет в изучении: сначала поднятые, затем остальные,
+    внутри каждой группы — в выбранном порядке добавления.
+
+    Порядок добавления — это `id`, а не `created_at`: импорт ставит всем строкам
+    файла один и тот же момент, а `id` растёт в порядке вставки, то есть
+    в порядке строк файла.
+    """
+    by_id = Word.id.desc() if order is NewWordsOrder.NEWEST_FIRST else Word.id.asc()
     stmt = (
         select(Word)
         .outerjoin(Progress, Progress.word_id == Word.id)
         .where(Progress.word_id.is_(None))
-        .order_by(Word.id)
+        .order_by(Word.priority.desc(), by_id)
     )
     if exclude_ids:
         stmt = stmt.where(Word.id.notin_(exclude_ids))
     return stmt.limit(limit)
+
+
+def get_new_words_order(session: Session) -> NewWordsOrder:
+    """Порядок новых слов из таблицы `settings`.
+
+    Строки нет — действует порядок добавления, как до появления настройки.
+    Неизвестное значение (база правлена руками) читается так же: из-за него
+    не должен ломаться отбор слов.
+    """
+    setting = session.get(Setting, NEW_WORDS_ORDER_KEY)
+    if setting is None:
+        return NewWordsOrder.OLDEST_FIRST
+    try:
+        return NewWordsOrder(setting.value)
+    except ValueError:
+        return NewWordsOrder.OLDEST_FIRST
+
+
+def set_new_words_order(session: Session, order: NewWordsOrder) -> None:
+    setting = session.get(Setting, NEW_WORDS_ORDER_KEY)
+    if setting is None:
+        session.add(Setting(key=NEW_WORDS_ORDER_KEY, value=order.value))
+    else:
+        setting.value = order.value
+    session.flush()
 
 
 def _started_today(session: Session, now: datetime) -> int:
@@ -110,7 +154,10 @@ def fetch_new_words(
     allowance = new_words_allowance(session, now, limit)
     if allowance == 0:
         return []
-    return list(session.scalars(new_words_query(allowance, exclude_ids)))
+    # Настройку читаем при каждом отборе, а не держим в памяти: сервер stateless,
+    # и смена порядка действует с ближайшего отбора — занятия и замены
+    order = get_new_words_order(session)
+    return list(session.scalars(new_words_query(allowance, exclude_ids, order)))
 
 
 def _due_words(session: Session, now: datetime, limit: int) -> list[Word]:
@@ -310,6 +357,8 @@ def select_word(
         write_state(progress, before, now)
         session.add(progress)
         word.progress = progress
+        # Отметка «Учить первым» живёт, пока слово новое
+        word.priority = False
     else:
         before = state_from_progress(progress)
 
@@ -525,11 +574,26 @@ def set_word_status(
         write_state(progress, start_learning(now), now)
         session.add(progress)
         word.progress = progress
+        # Отметка «Учить первым» живёт, пока слово новое
+        word.priority = False
 
     state = force_status(state_from_progress(progress), WordStatus(status), now, rng)
     write_state(progress, state, now)
     session.flush()
     return progress
+
+
+def set_word_priority(session: Session, word: Word, priority: bool) -> None:
+    """Поставить или снять отметку «Учить первым».
+
+    Снять можно всегда — у слова с прогрессом отметки и так нет, и запрос
+    остаётся идемпотентным. Поставить — только новому слову: иначе отметка
+    висела бы на слове, которое «Изучение» уже не возьмёт.
+    """
+    if priority and word.progress is not None:
+        raise WordNotNewError
+    word.priority = priority
+    session.flush()
 
 
 def due_counts(session: Session, now: datetime) -> tuple[int, int]:

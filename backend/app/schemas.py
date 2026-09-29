@@ -4,11 +4,57 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from app.models import ExerciseType, WordStatus
 
 # --------------------------------------------------------------------------- слова
+
+# Метка показывается чипом в строке словаря: длинное название её разорвало бы
+LABEL_NAME_MAX = 50
+
+
+def _label_name(v: str) -> str:
+    v = v.strip()
+    if not v:
+        raise ValueError("название метки не может быть пустым")
+    if len(v) > LABEL_NAME_MAX:
+        raise ValueError(f"название метки длиннее {LABEL_NAME_MAX} символов")
+    return v
+
+
+# Название метки без крайних пробелов: и в форме слова, и на вкладке «Метки»
+LabelName = Annotated[str, AfterValidator(_label_name)]
+
+
+class LabelRef(BaseModel):
+    """Метка в составе слова."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+
+
+class LabelOut(BaseModel):
+    """Метка в общем списке: со счётчиком слов для списка и для подтверждения удаления."""
+
+    id: int
+    name: str
+    word_count: int
+
+
+class LabelInput(BaseModel):
+    """Новое название метки — при создании и при переименовании."""
+
+    name: LabelName
 
 
 class WordBase(BaseModel):
@@ -34,7 +80,8 @@ class WordBase(BaseModel):
 
 
 class WordCreate(WordBase):
-    pass
+    # Названия, а не id: новые метки создаются вместе со словом, в одной транзакции
+    labels: list[LabelName] = Field(default_factory=list)
 
 
 class WordUpdate(BaseModel):
@@ -42,6 +89,8 @@ class WordUpdate(BaseModel):
     translation: str | None = Field(default=None, min_length=1)
     example: str | None = None
     example_translation: str | None = None
+    # `None` — метки не менять, `[]` — снять все
+    labels: list[LabelName] | None = None
 
 
 class WordStatusUpdate(BaseModel):
@@ -52,6 +101,15 @@ class WordStatusUpdate(BaseModel):
     """
 
     status: WordStatus | Literal["new"]
+
+
+class WordPriorityUpdate(BaseModel):
+    """Отметка «Учить первым», поставленная или снятая вручную из словаря.
+
+    Это действие с очередью, а не правка текста и не ответ: в `review_log`
+    оно не попадает."""
+
+    priority: bool
 
 
 class ProgressOut(BaseModel):
@@ -75,6 +133,9 @@ class WordOut(BaseModel):
     example: str | None
     example_translation: str | None
     created_at: datetime
+    priority: bool
+    # По названию без учёта регистра, «ё» = «е»
+    labels: list[LabelRef] = Field(default_factory=list)
 
 
 class WordWithProgress(WordOut):
@@ -291,3 +352,28 @@ class DailyStat(BaseModel):
     correct: int
     accuracy: float
     new_words: int
+
+
+# ---------------------------------------------------------------------- настройки
+
+
+class NewWordsOrder(StrEnum):
+    """В каком порядке «Изучение» берёт новые слова на знакомство.
+
+    Касается только новых слов: «Повторение» идёт по сроку, и настраиваемый
+    порядок там сломал бы интервальные повторения.
+    """
+
+    OLDEST_FIRST = "oldest_first"  # в порядке добавления в словарь
+    NEWEST_FIRST = "newest_first"  # сначала недавно добавленные
+
+
+class AppSettings(BaseModel):
+    """Настройки приложения, которые меняются из интерфейса.
+
+    В отличие от параметров алгоритма в `app/config.py`, их не правят руками
+    в `backend/.env`: они лежат в таблице `settings` и действуют в любом браузере.
+    Значения по умолчанию у поля нет, чтобы пустой `PUT` был ошибкой, а не сбросом.
+    """
+
+    new_words_order: NewWordsOrder

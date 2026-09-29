@@ -4,11 +4,20 @@ from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.clock import utcnow
-from app.models import ExerciseType, Progress, ReviewLog, Word, WordStatus
+from app.config import settings
+from app.models import (
+    ExerciseType,
+    Label,
+    Progress,
+    ReviewLog,
+    Word,
+    WordStatus,
+    word_labels,
+)
 from app.srs import EXERCISE_ROUNDS
 
 
@@ -1067,3 +1076,533 @@ def test_learn_finish_treats_a_mistake_like_a_clean_answer(
         assert progress["interval_days"] == 1.0
         assert progress["lapses"] == 0
     assert results[stumbled]["progress"]["ease"] == results[clean]["progress"]["ease"]
+
+
+# ------------------------------------------------------------ порядок новых слов
+
+
+def _set_order(client: TestClient, order: str) -> None:
+    response = client.put("/api/settings", json={"new_words_order": order})
+    assert response.status_code == 200, response.text
+
+
+def _ids_in_order(words: list[Word], order: str) -> list[int]:
+    """Слова фикстуры в порядке, в котором их должно брать «Изучение»."""
+    ids = [w.id for w in words]
+    return ids if order == "oldest_first" else ids[::-1]
+
+
+def test_settings_default_to_the_order_of_addition(client: TestClient):
+    # FR-002: пока настройку не трогали, поведение прежнее
+    response = client.get("/api/settings")
+    assert response.status_code == 200
+    assert response.json() == {"new_words_order": "oldest_first"}
+
+
+def test_settings_keep_the_chosen_order(client: TestClient):
+    response = client.put("/api/settings", json={"new_words_order": "newest_first"})
+
+    assert response.status_code == 200
+    assert response.json() == {"new_words_order": "newest_first"}
+    # FR-003: выбор хранится на сервере, а не в браузере
+    assert client.get("/api/settings").json() == {"new_words_order": "newest_first"}
+
+
+@pytest.mark.parametrize("payload", [{"new_words_order": "random"}, {}])
+def test_settings_reject_an_unknown_order(client: TestClient, payload: dict):
+    assert client.put("/api/settings", json=payload).status_code == 422
+
+
+@pytest.mark.parametrize("order", ["oldest_first", "newest_first"])
+def test_learn_session_follows_the_chosen_order(
+    client: TestClient, words: list[Word], order: str
+):
+    _set_order(client, order)
+
+    offered = [w["id"] for w in _session(client, "learn")["new_words"]]
+
+    # FR-004, SC-001, SC-004
+    assert offered == _ids_in_order(words, order)[:5]
+
+
+def test_replacement_follows_the_chosen_order(client: TestClient, words: list[Word]):
+    _set_order(client, "newest_first")
+    shown = [w["id"] for w in _session(client, "learn")["new_words"]]
+
+    body = client.post(
+        "/api/study/select",
+        json={"word_id": shown[0], "action": "know", "exclude_ids": shown},
+    ).json()
+
+    # Шестое с конца: пять последних уже показаны
+    assert body["replacement"]["id"] == words[-6].id
+
+
+def test_new_words_endpoint_follows_the_chosen_order(client: TestClient, words: list[Word]):
+    _set_order(client, "newest_first")
+
+    response = client.get("/api/study/new", params={"limit": 3})
+
+    assert [w["id"] for w in response.json()] == [w.id for w in words[-3:]][::-1]
+
+
+def test_review_session_ignores_the_order_of_new_words(
+    client: TestClient, db_session: Session, words: list[Word]
+):
+    # Семь слов в обороте, а в занятие-повторение помещается пять:
+    # берутся самые просроченные, и настройка на это не влияет
+    started = [w.id for w in words[:7]]
+    for word_id in started:
+        client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
+    for shift, word_id in enumerate(started):
+        db_session.get(Progress, word_id).due_at = utcnow() - timedelta(hours=shift + 1)
+    db_session.commit()
+
+    def due() -> set[int]:
+        return {e["word_id"] for e in _round_exercises(_session(client, "review")["rounds"])}
+
+    before = due()
+    _set_order(client, "newest_first")
+
+    # FR-013: повторение идёт по сроку
+    assert before == set(started[-5:])
+    assert due() == before
+
+
+def test_order_change_is_not_an_answer(client: TestClient, db_session: Session, words: list[Word]):
+    _set_order(client, "newest_first")
+    _set_order(client, "oldest_first")
+
+    # FR-014
+    assert db_session.scalars(select(ReviewLog)).all() == []
+
+
+# ------------------------------------------------------------ «Учить первым»
+
+
+def _raise(client: TestClient, word_id: int, priority: bool = True):
+    return client.put(f"/api/words/{word_id}/priority", json={"priority": priority})
+
+
+def test_priority_is_set_and_cleared(client: TestClient, words: list[Word]):
+    word_id = words[3].id
+
+    raised = _raise(client, word_id)
+    assert raised.status_code == 200
+    assert raised.json()["priority"] is True
+    # Повтор того же значения — не ошибка
+    assert _raise(client, word_id).status_code == 200
+
+    lowered = _raise(client, word_id, False)
+    assert lowered.status_code == 200
+    assert lowered.json()["priority"] is False
+    assert client.get(f"/api/words/{word_id}").json()["priority"] is False
+
+
+def test_priority_of_a_missing_word_is_not_found(client: TestClient, words: list[Word]):
+    assert _raise(client, 9999).status_code == 404
+
+
+@pytest.mark.parametrize("order", ["oldest_first", "newest_first"])
+def test_raised_words_come_first(client: TestClient, words: list[Word], order: str):
+    _set_order(client, order)
+    raised = {words[6].id, words[3].id, words[9].id}
+    for word_id in raised:
+        _raise(client, word_id)
+
+    offered = [w["id"] for w in _session(client, "learn")["new_words"]]
+
+    # FR-009, SC-002: сначала поднятые, затем остальные — внутри групп
+    # действует выбранный порядок
+    in_order = _ids_in_order(words, order)
+    expected = [i for i in in_order if i in raised] + [i for i in in_order if i not in raised]
+    assert offered == expected[:5]
+
+
+def test_session_holds_only_raised_words_when_they_overflow(
+    client: TestClient, words: list[Word]
+):
+    raised = [w.id for w in words[5:12]]
+    for word_id in raised:
+        _raise(client, word_id)
+
+    offered = [w["id"] for w in _session(client, "learn")["new_words"]]
+
+    assert offered == raised[:5]
+
+
+def test_raised_words_do_not_bypass_the_daily_limit(
+    client: TestClient, words: list[Word], monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(settings, "daily_new_limit", 9)
+    for word in words[:7]:
+        client.post("/api/study/select", json={"word_id": word.id, "action": "learn"})
+    raised = [words[8].id, words[10].id, words[11].id]
+    for word_id in raised:
+        _raise(client, word_id)
+
+    offered = [w["id"] for w in _session(client, "learn")["new_words"]]
+
+    # FR-012: min(5, 9 − 7) = 2 слова, и оба — поднятые
+    assert offered == raised[:2]
+
+
+def test_replacement_prefers_a_raised_word(client: TestClient, words: list[Word]):
+    shown = [w["id"] for w in _session(client, "learn")["new_words"]]
+    _raise(client, words[10].id)
+
+    body = client.post(
+        "/api/study/select",
+        json={"word_id": shown[0], "action": "know", "exclude_ids": shown},
+    ).json()
+
+    assert body["replacement"]["id"] == words[10].id
+
+
+@pytest.mark.parametrize("action", ["learn", "know"])
+def test_intro_choice_clears_the_priority(client: TestClient, words: list[Word], action: str):
+    word_id = words[4].id
+    _raise(client, word_id)
+
+    client.post("/api/study/select", json={"word_id": word_id, "action": action})
+
+    # FR-010: слово больше не новое, и отметка ему не нужна
+    assert client.get(f"/api/words/{word_id}").json()["priority"] is False
+
+
+def test_status_change_clears_the_priority(client: TestClient, words: list[Word]):
+    word_id = words[4].id
+    _raise(client, word_id)
+
+    learning = client.put(f"/api/words/{word_id}/status", json={"status": WordStatus.LEARNING})
+    assert learning.json()["priority"] is False
+
+    # Возврат в «Новое» не возвращает отметку
+    back = client.put(f"/api/words/{word_id}/status", json={"status": "new"})
+    assert back.json()["progress"] is None
+    assert back.json()["priority"] is False
+
+
+def test_only_a_new_word_can_be_raised(client: TestClient, words: list[Word]):
+    word_id = words[0].id
+    client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
+
+    # FR-008
+    refused = _raise(client, word_id)
+    assert refused.status_code == 409
+    assert refused.json()["detail"]
+    # Снять отметку можно всегда: запрос идемпотентен
+    assert _raise(client, word_id, False).status_code == 200
+
+
+def test_words_filter_by_priority(client: TestClient, words: list[Word]):
+    for word in (words[0], words[1], words[7]):
+        _raise(client, word.id)
+
+    raised = client.get("/api/words", params={"priority": "true"}).json()
+    assert {item["id"] for item in raised["items"]} == {words[0].id, words[1].id, words[7].id}
+    assert all(item["priority"] for item in raised["items"])
+
+    # FR-011: фильтр сочетается с поиском и со статусом
+    searched = client.get("/api/words", params={"priority": "true", "search": "outsid"}).json()
+    assert {item["word"] for item in searched["items"]} == {"outsider", "outside"}
+    new_only = client.get("/api/words", params={"priority": "true", "status": "new"}).json()
+    assert new_only["total"] == 3
+
+    # Без фильтра — все слова
+    assert client.get("/api/words").json()["total"] == len(words)
+
+
+def test_priority_is_not_an_answer(client: TestClient, db_session: Session, words: list[Word]):
+    _raise(client, words[2].id)
+    _raise(client, words[2].id, False)
+
+    # FR-014
+    assert db_session.scalars(select(ReviewLog)).all() == []
+
+
+# -------------------------------------------------------------------- метки
+
+
+def _label(db_session: Session, name: str, *on: Word) -> Label:
+    """Завести метку прямо в базе и навесить её на слова `on`."""
+    label = Label(name=name, name_key=name.casefold())
+    db_session.add(label)
+    for word in on:
+        word.labels.append(label)
+    db_session.commit()
+    return label
+
+
+def _label_names(body: dict) -> list[str]:
+    return [label["name"] for label in body["labels"]]
+
+
+def _count(db_session: Session, table) -> int:
+    return db_session.scalar(select(func.count()).select_from(table))
+
+
+def test_labels_are_empty_on_a_fresh_dictionary(client: TestClient, words: list[Word]):
+    assert client.get("/api/labels").json() == []
+    # У слова без меток поле есть и пустое
+    assert client.get(f"/api/words/{words[0].id}").json()["labels"] == []
+
+
+def test_labels_are_listed_alphabetically_with_word_counts(
+    client: TestClient, db_session: Session, words: list[Word]
+):
+    _label(db_session, "бета", words[0], words[1])
+    _label(db_session, "Альфа", words[2])
+    for name in ("ёлка", "ежевика", "ягода"):
+        _label(db_session, name)
+
+    body = client.get("/api/labels").json()
+
+    # FR-009: без учёта регистра, «ё» между «е» и «ж», а не после «я»
+    assert [label["name"] for label in body] == ["Альфа", "бета", "ежевика", "ёлка", "ягода"]
+    assert [label["word_count"] for label in body] == [1, 2, 0, 0, 0]
+
+
+def test_word_is_created_with_labels(client: TestClient, db_session: Session):
+    created = client.post(
+        "/api/words",
+        json={"word": "knife", "translation": "нож", "labels": ["Посуда", "кухня"]},
+    )
+
+    assert created.status_code == 201, created.text
+    # FR-001: метки в ответе сразу и по алфавиту
+    assert _label_names(created.json()) == ["кухня", "Посуда"]
+    kitchen_id = created.json()["labels"][0]["id"]
+
+    # FR-004a: совпадение без учёта регистра берёт существующую метку с её написанием
+    fork = client.post(
+        "/api/words", json={"word": "fork", "translation": "вилка", "labels": ["КУХНЯ"]}
+    ).json()
+    assert fork["labels"] == [{"id": kitchen_id, "name": "кухня"}]
+    assert _count(db_session, Label) == 2
+
+
+def test_rejected_duplicate_leaves_no_new_label(client: TestClient, db_session: Session):
+    client.post("/api/words", json={"word": "knife", "translation": "нож"})
+
+    duplicate = client.post(
+        "/api/words", json={"word": "knife", "translation": "нож", "labels": ["тест"]}
+    )
+
+    # FR-004a
+    assert duplicate.status_code == 409
+    assert db_session.scalar(select(Label).where(Label.name_key == "тест")) is None
+
+
+def test_update_replaces_labels_only_when_asked(client: TestClient, words: list[Word]):
+    word_id = words[0].id
+    client.patch(f"/api/words/{word_id}", json={"labels": ["кухня"]})
+
+    # FR-003a: без поля `labels` метки не меняются
+    kept = client.patch(f"/api/words/{word_id}", json={"translation": "чужак"}).json()
+    assert _label_names(kept) == ["кухня"]
+
+    replaced = client.patch(f"/api/words/{word_id}", json={"labels": ["b", "a"]}).json()
+    assert _label_names(replaced) == ["a", "b"]
+    assert _label_names(client.get(f"/api/words/{word_id}").json()) == ["a", "b"]
+
+    cleared = client.patch(f"/api/words/{word_id}", json={"labels": []}).json()
+    assert cleared["labels"] == []
+
+
+def test_rejected_update_keeps_the_labels(client: TestClient, db_session: Session):
+    client.post("/api/words", json={"word": "roll out", "translation": "вылезать"})
+    second = client.post(
+        "/api/words",
+        json={"word": "roll out", "translation": "внедрить", "labels": ["работа"]},
+    ).json()
+
+    clash = client.patch(
+        f"/api/words/{second['id']}", json={"translation": "вылезать", "labels": ["новая"]}
+    )
+
+    # FR-003a
+    assert clash.status_code == 409
+    db_session.expire_all()
+    assert _label_names(client.get(f"/api/words/{second['id']}").json()) == ["работа"]
+    assert db_session.scalar(select(Label).where(Label.name_key == "новая")) is None
+
+
+def test_repeated_label_names_collapse(client: TestClient, words: list[Word]):
+    body = client.patch(
+        f"/api/words/{words[0].id}", json={"labels": ["кухня", " КУХНЯ ", "кухня"]}
+    ).json()
+
+    # FR-002: первое вхождение побеждает
+    assert _label_names(body) == ["кухня"]
+
+
+@pytest.mark.parametrize("name", ["", "   ", "x" * 51])
+def test_bad_label_name_is_rejected_on_a_word(client: TestClient, words: list[Word], name: str):
+    created = client.post(
+        "/api/words", json={"word": "spoon", "translation": "ложка", "labels": [name]}
+    )
+    updated = client.patch(f"/api/words/{words[0].id}", json={"labels": [name]})
+
+    assert created.status_code == 422
+    assert updated.status_code == 422
+
+
+def test_labels_are_not_an_answer(client: TestClient, db_session: Session, words: list[Word]):
+    word_id = words[0].id
+    client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
+    before = client.get(f"/api/words/{word_id}").json()["progress"]
+    logged = _count(db_session, ReviewLog)
+
+    client.patch(f"/api/words/{word_id}", json={"labels": ["кухня"]})
+    after = client.patch(f"/api/words/{word_id}", json={"labels": []}).json()["progress"]
+
+    # FR-005, SC-004
+    for field in ("status", "ease", "lapses", "due_at"):
+        assert after[field] == before[field]
+    assert _count(db_session, ReviewLog) == logged
+
+
+@pytest.mark.parametrize("status_value", ["new", WordStatus.KNOWN])
+def test_status_change_keeps_the_labels(client: TestClient, words: list[Word], status_value):
+    word_id = words[0].id
+    client.patch(f"/api/words/{word_id}", json={"labels": ["кухня"]})
+    client.post("/api/study/select", json={"word_id": word_id, "action": "learn"})
+
+    body = client.put(f"/api/words/{word_id}/status", json={"status": status_value}).json()
+
+    assert _label_names(body) == ["кухня"]
+
+
+def test_deleting_a_word_keeps_its_labels(
+    client: TestClient, db_session: Session, words: list[Word]
+):
+    word_id = words[0].id
+    label = _label(db_session, "кухня", words[0])
+
+    client.delete(f"/api/words/{word_id}")
+
+    # FR-015
+    links = select(func.count()).select_from(word_labels).where(word_labels.c.word_id == word_id)
+    assert db_session.scalar(links) == 0
+    assert [item["id"] for item in client.get("/api/labels").json()] == [label.id]
+
+
+def _ids(client: TestClient, **params) -> set[int]:
+    return {item["id"] for item in client.get("/api/words", params=params).json()["items"]}
+
+
+def test_words_filter_by_label(client: TestClient, db_session: Session, words: list[Word]):
+    kitchen = _label(db_session, "кухня", words[0], words[1], words[5])
+    _label(db_session, "книга", words[1])
+    labeled = {words[0].id, words[1].id, words[5].id}
+
+    found = client.get("/api/words", params={"label": kitchen.id}).json()
+    # FR-007
+    assert {item["id"] for item in found["items"]} == labeled
+    assert found["total"] == 3
+
+    unlabeled = _ids(client, label="none", limit=200)
+    assert unlabeled == {w.id for w in words} - labeled
+
+    # FR-008: условия складываются
+    assert _ids(client, label=kitchen.id, search="outsid") == {words[0].id, words[1].id}
+    client.post("/api/study/select", json={"word_id": words[0].id, "action": "learn"})
+    assert _ids(client, label=kitchen.id, status="new") == {words[1].id, words[5].id}
+    _raise(client, words[5].id)
+    assert _ids(client, label=kitchen.id, priority="true") == {words[5].id}
+
+
+def test_words_filter_by_an_unknown_label(client: TestClient, words: list[Word]):
+    assert client.get("/api/words", params={"label": 9999}).json()["total"] == 0
+    assert client.get("/api/words", params={"label": "abc"}).status_code == 422
+
+
+def test_removed_label_leaves_the_filter(
+    client: TestClient, db_session: Session, words: list[Word]
+):
+    kitchen = _label(db_session, "кухня", words[0], words[1])
+
+    client.patch(f"/api/words/{words[0].id}", json={"labels": []})
+
+    assert _ids(client, label=kitchen.id) == {words[1].id}
+
+
+def test_label_is_created(client: TestClient):
+    created = client.post("/api/labels", json={"name": " кухня "})
+
+    # FR-010
+    assert created.status_code == 201, created.text
+    assert created.json() == {"id": created.json()["id"], "name": "кухня", "word_count": 0}
+    assert [label["name"] for label in client.get("/api/labels").json()] == ["кухня"]
+
+    # FR-011: регистр не делает метку новой
+    duplicate = client.post("/api/labels", json={"name": "КУХНЯ"})
+    assert duplicate.status_code == 409
+    assert "кухня" in duplicate.json()["detail"]
+
+
+@pytest.mark.parametrize("name", ["", "   ", "x" * 51])
+def test_bad_label_name_is_rejected(client: TestClient, db_session: Session, name: str):
+    label = _label(db_session, "кухня")
+
+    assert client.post("/api/labels", json={"name": name}).status_code == 422
+    assert client.patch(f"/api/labels/{label.id}", json={"name": name}).status_code == 422
+
+
+def test_label_is_renamed(client: TestClient, db_session: Session, words: list[Word]):
+    kitchen = _label(db_session, "кухяня", words[0], words[1])
+    _label(db_session, "Посуда")
+
+    renamed = client.patch(f"/api/labels/{kitchen.id}", json={"name": "кухня"})
+
+    # FR-012, SC-003: слова видят новое название, набор слов прежний
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json() == {"id": kitchen.id, "name": "кухня", "word_count": 2}
+    for word in words[:2]:
+        assert _label_names(client.get(f"/api/words/{word.id}").json()) == ["кухня"]
+
+    # Занято другой меткой — конфликт, своё же название в другом регистре — нет
+    assert client.patch(f"/api/labels/{kitchen.id}", json={"name": "посуда"}).status_code == 409
+    own_case = client.patch(f"/api/labels/{kitchen.id}", json={"name": "Кухня"})
+    assert own_case.status_code == 200
+    assert own_case.json()["name"] == "Кухня"
+
+    assert client.patch("/api/labels/9999", json={"name": "что-то"}).status_code == 404
+
+
+def test_label_is_deleted(client: TestClient, db_session: Session, words: list[Word]):
+    kitchen = _label(db_session, "кухня", words[0], words[1])
+    client.post("/api/study/select", json={"word_id": words[0].id, "action": "learn"})
+    counts = [_count(db_session, table) for table in (Word, Progress, ReviewLog)]
+
+    assert client.delete(f"/api/labels/{kitchen.id}").status_code == 204
+    # Связки ушли каскадом в базе; сессия теста общая с API и помнит старый список
+    db_session.expire_all()
+
+    # FR-014, SC-004: метка снята со слов, остальное не тронуто
+    assert client.get("/api/labels").json() == []
+    assert client.get(f"/api/words/{words[0].id}").json()["labels"] == []
+    assert _count(db_session, word_labels) == 0
+    assert [_count(db_session, table) for table in (Word, Progress, ReviewLog)] == counts
+
+    assert client.delete(f"/api/labels/{kitchen.id}").status_code == 404
+
+
+def test_labels_do_not_change_the_sessions(
+    client: TestClient, db_session: Session, words: list[Word]
+):
+    _start(client, 3)
+    _release(db_session, [w.id for w in words[:3]])
+
+    def picked() -> tuple[list[int], set[int]]:
+        learn = [w["id"] for w in _session(client, "learn")["new_words"]]
+        review = {e["word_id"] for e in _round_exercises(_session(client, "review")["rounds"])}
+        return learn, review
+
+    before = picked()
+    _label(db_session, "кухня", words[0], words[4], words[7])
+    _label(db_session, "книга", words[3])
+
+    # SC-006
+    assert picked() == before

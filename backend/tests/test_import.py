@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.cli import import_csv
 from app.clock import utcnow
-from app.models import Word
+from app.models import Label, Word
 
 # Файл намеренно записывается с BOM — как исходный dictionary.csv
 CSV_BODY = '''"word","translation","example","example_translation"
@@ -108,3 +108,36 @@ def test_import_keeps_meanings_entered_by_hand(tmp_path, db_session: Session):
         select(Word).where(Word.word_key == "roll out").order_by(Word.id)
     ).all()
     assert [r.translation for r in rows] == ["вылезать", "внедрить"]
+
+
+def test_import_keeps_the_priority(tmp_path, db_session: Session):
+    path = _write_csv(tmp_path)
+    import_csv(path, db_session)
+    budge = db_session.scalar(select(Word).where(Word.word_key == "budge"))
+    budge.priority = True
+    db_session.commit()
+
+    import_csv(path, db_session)
+
+    # FR-015: повторный импорт не трогает отметку «Учить первым»
+    db_session.refresh(budge)
+    assert budge.priority is True
+    others = db_session.scalars(select(Word).where(Word.id != budge.id)).all()
+    assert others and not any(w.priority for w in others)
+
+
+def test_import_keeps_the_labels(tmp_path, db_session: Session):
+    path = _write_csv(tmp_path)
+    import_csv(path, db_session)
+    budge = db_session.scalar(select(Word).where(Word.word_key == "budge"))
+    budge.labels.append(Label(name="глаголы", name_key="глаголы"))
+    db_session.commit()
+
+    import_csv(path, db_session)
+
+    # FR-016: повторный импорт не трогает разметку и не заводит меток
+    db_session.refresh(budge)
+    assert [label.name for label in budge.labels] == ["глаголы"]
+    assert db_session.scalar(select(func.count(Label.id))) == 1
+    others = db_session.scalars(select(Word).where(Word.id != budge.id)).all()
+    assert others and not any(w.labels for w in others)

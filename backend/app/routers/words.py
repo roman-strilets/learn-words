@@ -1,21 +1,23 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.clock import utcnow
 from app.db import get_session
 from app.exercises import translation_variants, word_key_for
-from app.models import Progress, Word, WordStatus
+from app.labels_service import resolve_labels
+from app.models import Progress, Word, WordStatus, word_labels
 from app.routers.deps import get_word
 from app.schemas import (
     WordCreate,
     WordOut,
     WordPage,
+    WordPriorityUpdate,
     WordStatusUpdate,
     WordUpdate,
     WordWithProgress,
 )
-from app.study_service import set_word_status
+from app.study_service import WordNotNewError, set_word_priority, set_word_status
 
 router = APIRouter(prefix="/words", tags=["words"])
 
@@ -28,6 +30,11 @@ def list_words(
         alias="status",
         description="new | learning | review | known | suspended",
     ),
+    priority: bool | None = Query(
+        default=None, description="Только слова с отметкой «Учить первым»"
+    ),
+    # Одно значение вместо пары `label_id` + `unlabeled`: противоречие не передать
+    label: str | None = Query(default=None, description="id метки или none — слова без меток"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_session),
@@ -44,8 +51,22 @@ def list_words(
         stmt = stmt.where(Progress.word_id.is_(None))
     elif status_filter:
         if status_filter not in {s.value for s in WordStatus}:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Неизвестный статус")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Неизвестный статус")
         stmt = stmt.where(Progress.status == status_filter)
+
+    if priority:
+        stmt = stmt.where(Word.priority.is_(True))
+
+    if label == "none":
+        stmt = stmt.where(~exists().where(word_labels.c.word_id == Word.id))
+    elif label:
+        if not label.isdigit():
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Неизвестная метка")
+        stmt = stmt.where(
+            exists().where(
+                word_labels.c.word_id == Word.id, word_labels.c.label_id == int(label)
+            )
+        )
 
     total = session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     items = session.scalars(stmt.order_by(Word.id).limit(limit).offset(offset)).all()
@@ -98,6 +119,7 @@ def create_word(payload: WordCreate, session: Session = Depends(get_session)) ->
         example_translation=payload.example_translation,
         created_at=utcnow(),
     )
+    word.labels = resolve_labels(session, payload.labels)
     session.add(word)
     session.flush()
     return word
@@ -131,6 +153,8 @@ def update_word(
         word.example = (data["example"] or "").strip() or None
     if "example_translation" in data:
         word.example_translation = (data["example_translation"] or "").strip() or None
+    if payload.labels is not None:
+        word.labels = resolve_labels(session, payload.labels)
 
     session.flush()
     return word
@@ -144,6 +168,22 @@ def set_status(
 ) -> Word:
     """Перевести слово в другой статус вручную — из словаря, а не занятием."""
     set_word_status(session, word, payload.status, utcnow())
+    return word
+
+
+@router.put("/{word_id}/priority", response_model=WordWithProgress)
+def set_priority(
+    payload: WordPriorityUpdate,
+    word: Word = Depends(get_word),
+    session: Session = Depends(get_session),
+) -> Word:
+    """Поднять новое слово в очереди «Изучения» или снять отметку."""
+    try:
+        set_word_priority(session, word, payload.priority)
+    except WordNotNewError:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail="Поднять можно только новое слово"
+        ) from None
     return word
 
 
