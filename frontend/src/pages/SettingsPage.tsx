@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router'
 
 import { api } from '../api/client'
 import type { NewWordsOrder } from '../api/types'
+import { ClassifierSection } from '../components/ClassifierSection'
 import { LabelsSection } from '../components/LabelsSection'
 import { ErrorBox, Spinner } from '../components/ui'
 import { useSpeech, type VoiceOption } from '../speech/SpeechProvider'
@@ -178,13 +179,16 @@ function VoiceSection() {
 const TABS = [
   { value: 'general', label: 'Общие' },
   { value: 'labels', label: 'Метки' },
+  { value: 'classifier', label: 'Разметка' },
 ] as const
+
+type Tab = (typeof TABS)[number]['value']
 
 export function SettingsPage() {
   // Вкладка в адресе, а не в `localStorage`: это навигация, а не предпочтение —
   // ссылка ведёт прямо на неё, и перезагрузка её не теряет
   const [params, setParams] = useSearchParams()
-  const tab = params.get('tab') === 'labels' ? 'labels' : 'general'
+  const tab: Tab = TABS.find((item) => item.value === params.get('tab'))?.value ?? 'general'
 
   return (
     <div className="flex w-full max-w-3xl flex-col gap-8">
@@ -211,6 +215,8 @@ export function SettingsPage() {
 
       {tab === 'labels' ? (
         <LabelsSection />
+      ) : tab === 'classifier' ? (
+        <ClassifierSection />
       ) : (
         <>
           <NewWordsOrderSection />

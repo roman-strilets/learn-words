@@ -9,8 +9,10 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import Label, word_labels
-from app.schemas import LabelOut
+from app.classifier import Classifier, LabelItem, WordItem
+from app.models import Label, Word, word_labels
+from app.schemas import ClassifyBatch, ClassifyRequest, ClassifyResult, LabelOut, LabelRef
+from app.word_filters import count_rows, filtered_words
 
 
 def label_key(name: str) -> str:
@@ -40,7 +42,13 @@ def list_labels(session: Session) -> list[LabelOut]:
         .group_by(Label.id)
     ).all()
     rows.sort(key=lambda row: label_sort_key(row[0].name_key))
-    return [LabelOut(id=label.id, name=label.name, word_count=count) for label, count in rows]
+    return [label_out(label, count) for label, count in rows]
+
+
+def label_out(label: Label, count: int) -> LabelOut:
+    return LabelOut(
+        id=label.id, name=label.name, description=label.description, word_count=count
+    )
 
 
 def resolve_labels(session: Session, names: list[str]) -> list[Label]:
@@ -85,3 +93,97 @@ def word_count(session: Session, label: Label) -> int:
     return session.scalar(
         select(func.count()).select_from(word_labels).where(word_labels.c.label_id == label.id)
     ) or 0
+
+
+class NoLabelsError(ValueError):
+    """В наборе разметки не осталось ни одной существующей метки."""
+
+
+def classify_batch(
+    session: Session, request: ClassifyRequest, classifier: Classifier
+) -> ClassifyBatch:
+    """Разметить одну пачку: каждому слову — выбранная моделью метка или ничего.
+
+    Метки только добавляются, ни одна не снимается. `progress` и `review_log`
+    не трогаются: разметка — правка словаря, а не ответ на упражнение.
+    Пачка применяется целиком или никак: ошибка классификатора случается до
+    любой записи, а его исключения переводит в ответ роутер.
+    """
+    labels = session.scalars(select(Label).where(Label.id.in_(request.label_ids))).all()
+    if not labels:
+        raise NoLabelsError("Нет меток для разметки")
+
+    def selection(from_id: int | None):
+        return filtered_words(
+            search=request.search,
+            status=request.status,
+            priority=request.priority,
+            label=request.label,
+            from_id=from_id,
+        )
+
+    words = session.scalars(
+        selection(request.from_id).order_by(Word.id).limit(request.limit)
+    ).all()
+    if not words:
+        return ClassifyBatch(results=[], skipped=0, next_from_id=None, remaining=0)
+
+    word_items = [WordItem(id=w.id, word=w.word, translation=w.translation) for w in words]
+    label_items = [
+        LabelItem(id=label.id, name=label.name, description=label.description)
+        for label in labels
+    ]
+    # Модель думает до двух минут. Открытая всё это время транзакция чтения в
+    # WAL держала бы старый снимок, и запись после чужой записи (правка слова
+    # во второй вкладке) упала бы с SQLITE_BUSY_SNAPSHOT
+    session.commit()
+
+    choices = classifier.classify(word_items, label_items)
+
+    # Пока модель думала, слово или метку могли удалить, а метку — поставить
+    # вручную: решение принимается по свежему состоянию
+    session.expire_all()
+    fresh_words = {
+        w.id: w
+        for w in session.scalars(select(Word).where(Word.id.in_([i.id for i in word_items])))
+    }
+    fresh_labels = {
+        label.id: label
+        for label in session.scalars(
+            select(Label).where(Label.id.in_([i.id for i in label_items]))
+        )
+    }
+
+    results: list[ClassifyResult] = []
+    skipped = 0
+    for item in word_items:
+        word = fresh_words.get(item.id)
+        if word is None:
+            skipped += 1
+            continue
+        label_id = choices.get(item.id)
+        label = fresh_labels.get(label_id) if label_id is not None else None
+        added = label is not None and label not in word.labels
+        if added:
+            word.labels.append(label)
+        results.append(
+            ClassifyResult(
+                word_id=word.id,
+                word=word.word,
+                translation=word.translation,
+                label=LabelRef(id=label.id, name=label.name) if label is not None else None,
+                added=added,
+            )
+        )
+    session.flush()
+
+    # Курсор по `id`, а не смещение: слова, получившие метку, выпадают из
+    # фильтра «Без меток», но они уже позади курсора и ничего не сдвигают
+    next_from_id = word_items[-1].id + 1
+    remaining = session.scalar(count_rows(selection(next_from_id))) or 0
+    return ClassifyBatch(
+        results=results,
+        skipped=skipped,
+        next_from_id=next_from_id if remaining else None,
+        remaining=remaining,
+    )

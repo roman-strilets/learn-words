@@ -6,6 +6,7 @@ import { api } from '../api/client'
 import type { WordStatusValue, WordWithProgress } from '../api/types'
 import { STATUS_CLASS, STATUS_LABEL, formatDue } from '../lib/format'
 import { ErrorBox, Spinner } from '../components/ui'
+import { AutoLabelPanel } from '../components/AutoLabelPanel'
 import { ArrowUpIcon, SpeakerIcon } from '../components/icons'
 import { WordForm } from '../components/WordForm'
 import { useSpeech } from '../speech/SpeechProvider'
@@ -64,6 +65,7 @@ export function WordsPage() {
   const [label, setLabel] = useState<number | 'none' | ''>('')
   const [page, setPage] = useState(0)
   const [editingId, setEditingId] = useState<number | null>(null)
+  const [autoLabelOpen, setAutoLabelOpen] = useState(false)
 
   const { data: labels } = useQuery({ queryKey: ['labels'], queryFn: api.listLabels })
 
@@ -203,8 +205,32 @@ export function WordsPage() {
               </option>
             ))}
           </select>
+          <button
+            type="button"
+            onClick={() => setAutoLabelOpen((value) => !value)}
+            aria-expanded={autoLabelOpen}
+            className={`rounded px-3 py-2 text-sm transition-colors ${
+              autoLabelOpen ? 'bg-accent text-white' : 'bg-panel text-ink-soft hover:bg-hairline'
+            }`}
+          >
+            Разметить автоматически
+          </button>
         </div>
       </div>
+
+      {/* Панель берёт фильтры «Словаря»: разметка идёт ровно по тем словам,
+          что видны в списке */}
+      {autoLabelOpen ? (
+        <AutoLabelPanel
+          filters={{
+            search: search || undefined,
+            status: status || undefined,
+            priority: priorityOnly || undefined,
+            label: label === '' ? undefined : label,
+          }}
+          onClose={() => setAutoLabelOpen(false)}
+        />
+      ) : null}
 
       {error ? <ErrorBox message={(error as Error).message} /> : null}
       {rowError ? <ErrorBox message={rowError.message} /> : null}

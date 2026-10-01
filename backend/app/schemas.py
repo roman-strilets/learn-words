@@ -13,6 +13,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.config import settings
 from app.models import ExerciseType, WordStatus
 
 # --------------------------------------------------------------------------- слова
@@ -33,6 +34,22 @@ def _label_name(v: str) -> str:
 # Название метки без крайних пробелов: и в форме слова, и на вкладке «Метки»
 LabelName = Annotated[str, AfterValidator(_label_name)]
 
+# Описание — пояснение темы для модели, а не текст: пары фраз хватает
+LABEL_DESCRIPTION_MAX = 200
+
+
+def _label_description(v: str | None) -> str | None:
+    """Пустое описание и его отсутствие — одно и то же, `None`."""
+    if v is None:
+        return None
+    v = v.strip()
+    if len(v) > LABEL_DESCRIPTION_MAX:
+        raise ValueError(f"описание метки длиннее {LABEL_DESCRIPTION_MAX} символов")
+    return v or None
+
+
+LabelDescription = Annotated[str | None, AfterValidator(_label_description)]
+
 
 class LabelRef(BaseModel):
     """Метка в составе слова."""
@@ -48,13 +65,33 @@ class LabelOut(BaseModel):
 
     id: int
     name: str
+    description: str | None
     word_count: int
 
 
 class LabelInput(BaseModel):
-    """Новое название метки — при создании и при переименовании."""
+    """Новая метка."""
 
     name: LabelName
+    description: LabelDescription = None
+
+
+class LabelUpdate(BaseModel):
+    """Частичная правка метки: меняются только переданные поля.
+
+    Поэтому переименование `{name}` не стирает описание.
+    """
+
+    name: LabelName | None = None
+    description: LabelDescription = None
+
+    @model_validator(mode="after")
+    def _something_to_change(self) -> LabelUpdate:
+        if not self.model_fields_set:
+            raise ValueError("нечего менять: передайте name или description")
+        if "name" in self.model_fields_set and self.name is None:
+            raise ValueError("название метки не может быть пустым")
+        return self
 
 
 class WordBase(BaseModel):
@@ -147,6 +184,122 @@ class WordPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+# ----------------------------------------------------------------------- разметка
+
+
+class ClassifyRequest(BaseModel):
+    """Одна пачка автоматической разметки.
+
+    Пачка — одно звено цепочки независимых запросов: сервер не помнит этап,
+    фронт передаёт курсор `from_id` из ответа предыдущей пачки. Фильтры — те же,
+    что у `GET /words`, и значат то же самое.
+    """
+
+    search: str | None = None
+    status: str | None = None
+    priority: bool | None = None
+    # id метки или `none`; число принимается, чтобы фронт мог передать id как есть
+    label: str | None = None
+    label_ids: list[int] = Field(min_length=1)
+    from_id: int | None = Field(default=None, ge=1)
+    limit: int
+
+    @field_validator("label", mode="before")
+    @classmethod
+    def _label_as_text(cls, v: object) -> object:
+        return str(v) if isinstance(v, int) and not isinstance(v, bool) else v
+
+    @field_validator("limit")
+    @classmethod
+    def _limit_in_range(cls, v: int) -> int:
+        if not 1 <= v <= settings.classifier_batch_max:
+            raise ValueError(f"размер пачки — от 1 до {settings.classifier_batch_max}")
+        return v
+
+
+class ClassifyResult(BaseModel):
+    """Итог по слову. `added` — метка поставлена этим запросом, а не стояла раньше."""
+
+    word_id: int
+    word: str
+    translation: str
+    label: LabelRef | None
+    added: bool
+
+
+# Пределы длины — с запасом на облачные адреса и ключи; модели называются коротко
+CLASSIFIER_URL_MAX = 512
+CLASSIFIER_KEY_MAX = 512
+CLASSIFIER_MODEL_MAX = 128
+
+
+class ClassifierInput(BaseModel):
+    """Подключение к классификатору: адрес сервиса, ключ доступа и модель."""
+
+    base_url: str
+    api_key: str
+    model: str
+
+    @field_validator("base_url")
+    @classmethod
+    def _url(cls, v: str) -> str:
+        v = v.strip()
+        if len(v) > CLASSIFIER_URL_MAX:
+            raise ValueError(f"адрес длиннее {CLASSIFIER_URL_MAX} символов")
+        if not v.startswith(("http://", "https://")) or v in {"http://", "https://"}:
+            raise ValueError("адрес должен начинаться с http:// или https://")
+        return v
+
+    @field_validator("api_key")
+    @classmethod
+    def _key(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("ключ доступа не может быть пустым")
+        if len(v) > CLASSIFIER_KEY_MAX:
+            raise ValueError(f"ключ длиннее {CLASSIFIER_KEY_MAX} символов")
+        # Иначе его отклонит SDK — лучше сказать об этом при сохранении
+        if not v.isascii() or not v.isprintable() or " " in v:
+            raise ValueError("ключ — только латиница, цифры и знаки, без пробелов")
+        return v
+
+    @field_validator("model")
+    @classmethod
+    def _model(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("модель не может быть пустой")
+        if len(v) > CLASSIFIER_MODEL_MAX:
+            raise ValueError(f"название модели длиннее {CLASSIFIER_MODEL_MAX} символов")
+        return v
+
+
+class ClassifierSettings(ClassifierInput):
+    """Действующее подключение. `is_default` — ничего не сохранено, всё из `config.py`."""
+
+    is_default: bool
+
+
+class ClassifierCheck(BaseModel):
+    """Итог «Проверить подключение»: неудача — ответ, а не ошибка запроса."""
+
+    ok: bool
+    detail: str
+
+
+class ClassifyBatch(BaseModel):
+    """Ответ пачки: результаты по `id` и курсор следующей.
+
+    `skipped` — слова, удалённые, пока модель думала. `next_from_id` — `null`,
+    если подходящих слов дальше нет. `remaining` — сколько их с `id ≥ next_from_id`.
+    """
+
+    results: list[ClassifyResult]
+    skipped: int
+    next_from_id: int | None
+    remaining: int
 
 
 # ---------------------------------------------------------------------- упражнения

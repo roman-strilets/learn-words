@@ -1,10 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
 from sqlalchemy.orm import Session
 
+from app.classifier import Classifier, ClassifierError, get_classifier
 from app.db import get_session
-from app.labels_service import find_by_key, label_key, list_labels, word_count
+from app.labels_service import (
+    NoLabelsError,
+    classify_batch,
+    find_by_key,
+    label_key,
+    label_out,
+    list_labels,
+    word_count,
+)
 from app.models import Label
-from app.schemas import LabelInput, LabelOut
+from app.schemas import ClassifyBatch, ClassifyRequest, LabelInput, LabelOut, LabelUpdate
+from app.word_filters import WordFilterError
 
 router = APIRouter(prefix="/labels", tags=["labels"])
 
@@ -34,28 +44,53 @@ def create_label(payload: LabelInput, session: Session = Depends(get_session)) -
     if existing is not None:
         raise _taken(existing)
 
-    label = Label(name=payload.name, name_key=key)
+    label = Label(name=payload.name, name_key=key, description=payload.description)
     session.add(label)
     session.flush()
-    return LabelOut(id=label.id, name=label.name, word_count=0)
+    return label_out(label, 0)
+
+
+@router.post("/classify", response_model=ClassifyBatch)
+def classify(
+    payload: ClassifyRequest,
+    session: Session = Depends(get_session),
+    classifier: Classifier = Depends(get_classifier),
+) -> ClassifyBatch:
+    """Разметить одну пачку слов автоматически.
+
+    Обычный `def`: FastAPI выполнит его в пуле потоков, и минута ожидания
+    модели не блокирует другие запросы.
+    """
+    try:
+        return classify_batch(session, payload, classifier)
+    except (WordFilterError, NoLabelsError) as err:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(err)) from None
+    except ClassifierError as err:
+        raise HTTPException(err.status_code, detail=err.detail) from None
 
 
 @router.patch("/{label_id}", response_model=LabelOut)
-def rename_label(
-    payload: LabelInput,
+def update_label(
+    payload: LabelUpdate,
     label: Label = Depends(_get_label),
     session: Session = Depends(get_session),
 ) -> LabelOut:
-    """Переименовать метку. Смена только регистра своего же названия — не конфликт."""
-    key = label_key(payload.name)
-    clash = find_by_key(session, key, exclude_id=label.id)
-    if clash is not None:
-        raise _taken(clash)
+    """Переименовать метку или поменять описание — только переданные поля.
 
-    label.name = payload.name
-    label.name_key = key
+    Смена только регистра своего же названия — не конфликт.
+    """
+    if "name" in payload.model_fields_set and payload.name is not None:
+        key = label_key(payload.name)
+        clash = find_by_key(session, key, exclude_id=label.id)
+        if clash is not None:
+            raise _taken(clash)
+        label.name = payload.name
+        label.name_key = key
+    if "description" in payload.model_fields_set:
+        label.description = payload.description
+
     session.flush()
-    return LabelOut(id=label.id, name=label.name, word_count=word_count(session, label))
+    return label_out(label, word_count(session, label))
 
 
 @router.delete("/{label_id}", status_code=status.HTTP_204_NO_CONTENT)

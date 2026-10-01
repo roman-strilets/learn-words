@@ -9,6 +9,8 @@ import { ErrorBox, Spinner } from './ui'
 
 /** Совпадает с `LABEL_NAME_MAX` на сервере: длиннее он ответит 422. */
 const LABEL_NAME_MAX = 50
+/** Совпадает с `LABEL_DESCRIPTION_MAX` на сервере. */
+const LABEL_DESCRIPTION_MAX = 200
 
 const wordCount = (count: number) => `${count} ${plural(count, ['слово', 'слова', 'слов'])}`
 
@@ -29,14 +31,15 @@ function useInvalidate() {
   }
 }
 
-/** Строка списка: название и число слов, либо поле переименования на её месте. */
+/** Строка списка: название, описание и число слов, либо форма правки на её месте. */
 function LabelRow({ label }: { label: Label }) {
   const invalidate = useInvalidate()
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState(label.name)
+  const [description, setDescription] = useState(label.description ?? '')
 
   const rename = useMutation({
-    mutationFn: api.renameLabel,
+    mutationFn: api.updateLabel,
     onSuccess: () => {
       setEditing(false)
       invalidate()
@@ -54,7 +57,7 @@ function LabelRow({ label }: { label: Label }) {
   if (editing) {
     const submit = (event: FormEvent) => {
       event.preventDefault()
-      rename.mutate({ id: label.id, name })
+      rename.mutate({ id: label.id, name, description })
     }
     // Ошибка остаётся в строке вместе с введённым — его можно поправить
     return (
@@ -68,6 +71,14 @@ function LabelRow({ label }: { label: Label }) {
             aria-label={`Новое название метки «${label.name}»`}
             className={INPUT}
           />
+          <input
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            maxLength={LABEL_DESCRIPTION_MAX}
+            placeholder="Описание для разметки"
+            aria-label={`Описание метки «${label.name}» для разметки`}
+            className={`${INPUT} basis-full`}
+          />
           <button
             type="submit"
             disabled={!name.trim() || rename.isPending}
@@ -80,6 +91,7 @@ function LabelRow({ label }: { label: Label }) {
             onClick={() => {
               setEditing(false)
               setName(label.name)
+              setDescription(label.description ?? '')
               rename.reset()
             }}
             className="text-muted underline underline-offset-4 hover:text-ink"
@@ -95,20 +107,26 @@ function LabelRow({ label }: { label: Label }) {
   return (
     <li className="flex flex-col gap-2 border-b border-hairline/60 py-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <span className="flex items-baseline gap-3">
-          <span className="font-semibold text-ink">{label.name}</span>
-          <span className="text-sm text-muted">{wordCount(label.word_count)}</span>
+        <span className="flex flex-col gap-1">
+          <span className="flex items-baseline gap-3">
+            <span className="font-semibold text-ink">{label.name}</span>
+            <span className="text-sm text-muted">{wordCount(label.word_count)}</span>
+          </span>
+          {label.description ? (
+            <span className="text-sm text-muted">{label.description}</span>
+          ) : null}
         </span>
         <span className="text-sm whitespace-nowrap">
           <button
             type="button"
             onClick={() => {
               setName(label.name)
+              setDescription(label.description ?? '')
               setEditing(true)
             }}
             className="mr-3 text-accent underline underline-offset-4"
           >
-            Переименовать
+            Изменить
           </button>
           <button
             type="button"
@@ -132,6 +150,7 @@ function LabelRow({ label }: { label: Label }) {
 export function LabelsSection() {
   const invalidate = useInvalidate()
   const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
   const { data, isLoading, error } = useQuery({ queryKey: ['labels'], queryFn: api.listLabels })
 
   // На 409 введённое остаётся в поле: очищаем только после удачного создания
@@ -139,13 +158,14 @@ export function LabelsSection() {
     mutationFn: api.createLabel,
     onSuccess: () => {
       setName('')
+      setDescription('')
       invalidate()
     },
   })
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
-    create.mutate(name)
+    create.mutate({ name, description })
   }
 
   return (
@@ -156,6 +176,10 @@ export function LabelsSection() {
         или в «Изменить», а здесь общий список: его можно пополнить, переименовать
         метку или удалить её со всех слов сразу. На занятия метки не влияют.
       </p>
+      <p className="text-muted">
+        Описание необязательно: автоматическая разметка показывает его модели вместо
+        названия. Короткое «B2» модель поймёт хуже, чем «advanced vocabulary (CEFR B2)».
+      </p>
 
       <form onSubmit={submit} className="flex flex-wrap items-center gap-3">
         <input
@@ -164,6 +188,14 @@ export function LabelsSection() {
           maxLength={LABEL_NAME_MAX}
           placeholder="Новая метка"
           aria-label="Новая метка"
+          className={INPUT}
+        />
+        <input
+          value={description}
+          onChange={(event) => setDescription(event.target.value)}
+          maxLength={LABEL_DESCRIPTION_MAX}
+          placeholder="Описание для разметки — необязательно"
+          aria-label="Описание новой метки для разметки"
           className={INPUT}
         />
         <button type="submit" disabled={!name.trim() || create.isPending} className={PRIMARY}>

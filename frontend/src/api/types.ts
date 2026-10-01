@@ -23,7 +23,16 @@ export interface LabelRef {
 export interface Label {
   id: number
   name: string
+  /** Пояснение темы для автоматической разметки; `null` — модель судит по названию */
+  description: string | null
   word_count: number
+}
+
+/** Частичная правка метки: меняются только переданные поля. */
+export interface LabelUpdate {
+  name?: string
+  /** `null` или пустая строка стирают описание */
+  description?: string | null
 }
 
 export interface Word {
@@ -58,6 +67,46 @@ export interface WordPage {
   total: number
   limit: number
   offset: number
+}
+
+/** Фильтры «Словаря», с которыми открыта разметка: значат то же, что у списка. */
+export interface ClassifyFilters {
+  search?: string
+  status?: string
+  priority?: boolean
+  /** id метки или `none` — слова без меток */
+  label?: number | 'none'
+}
+
+/**
+ * Одна пачка автоматической разметки. Сервер не помнит этап: курсор `from_id`
+ * берётся из ответа предыдущей пачки, `null` — с начала.
+ */
+export interface ClassifyRequest extends ClassifyFilters {
+  label_ids: number[]
+  from_id?: number | null
+  limit: number
+}
+
+export interface ClassifyResult {
+  word_id: number
+  word: string
+  translation: string
+  /** `null` — ни одна метка набора не подошла */
+  label: LabelRef | null
+  /** Метка поставлена этим запросом; уже стоявшая — `false` */
+  added: boolean
+}
+
+export interface ClassifyBatch {
+  /** По слову на каждое обработанное, в порядке `id` */
+  results: ClassifyResult[]
+  /** Слова, удалённые, пока модель думала */
+  skipped: number
+  /** Курсор следующей пачки; `null` — подходящих слов дальше нет */
+  next_from_id: number | null
+  /** Сколько подходящих слов осталось с `id ≥ next_from_id` */
+  remaining: number
 }
 
 export interface ChoiceExercise {
@@ -211,4 +260,22 @@ export type NewWordsOrder = 'oldest_first' | 'newest_first'
 /** Настройки приложения, которые хранятся на сервере, а не в браузере. */
 export interface AppSettings {
   new_words_order: NewWordsOrder
+}
+
+/** Подключение к классификатору меток. */
+export interface ClassifierInput {
+  base_url: string
+  api_key: string
+  model: string
+}
+
+/** Действующее подключение; `is_default` — ничего не сохранено, всё по умолчанию. */
+export interface ClassifierSettings extends ClassifierInput {
+  is_default: boolean
+}
+
+/** Итог «Проверить подключение»: неудача — ответ с причиной, а не ошибка запроса. */
+export interface ClassifierCheck {
+  ok: boolean
+  detail: string
 }

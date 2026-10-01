@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import exists, func, or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.clock import utcnow
 from app.db import get_session
 from app.exercises import translation_variants, word_key_for
 from app.labels_service import resolve_labels
-from app.models import Progress, Word, WordStatus, word_labels
+from app.models import Word
 from app.routers.deps import get_word
 from app.schemas import (
     WordCreate,
@@ -18,6 +18,7 @@ from app.schemas import (
     WordWithProgress,
 )
 from app.study_service import WordNotNewError, set_word_priority, set_word_status
+from app.word_filters import WordFilterError, count_rows, filtered_words
 
 router = APIRouter(prefix="/words", tags=["words"])
 
@@ -35,40 +36,21 @@ def list_words(
     ),
     # Одно значение вместо пары `label_id` + `unlabeled`: противоречие не передать
     label: str | None = Query(default=None, description="id метки или none — слова без меток"),
+    from_id: int | None = Query(
+        default=None, ge=1, description="Только записи с id ≥ from_id — курсор разметки"
+    ),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_session),
 ) -> WordPage:
-    stmt = select(Word).outerjoin(Progress, Progress.word_id == Word.id)
-
-    if search:
-        pattern = f"%{search.strip().lower()}%"
-        stmt = stmt.where(
-            or_(func.lower(Word.word).like(pattern), func.lower(Word.translation).like(pattern))
+    try:
+        stmt = filtered_words(
+            search=search, status=status_filter, priority=priority, label=label, from_id=from_id
         )
+    except WordFilterError as err:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(err)) from None
 
-    if status_filter == "new":
-        stmt = stmt.where(Progress.word_id.is_(None))
-    elif status_filter:
-        if status_filter not in {s.value for s in WordStatus}:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Неизвестный статус")
-        stmt = stmt.where(Progress.status == status_filter)
-
-    if priority:
-        stmt = stmt.where(Word.priority.is_(True))
-
-    if label == "none":
-        stmt = stmt.where(~exists().where(word_labels.c.word_id == Word.id))
-    elif label:
-        if not label.isdigit():
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Неизвестная метка")
-        stmt = stmt.where(
-            exists().where(
-                word_labels.c.word_id == Word.id, word_labels.c.label_id == int(label)
-            )
-        )
-
-    total = session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    total = session.scalar(count_rows(stmt)) or 0
     items = session.scalars(stmt.order_by(Word.id).limit(limit).offset(offset)).all()
 
     return WordPage(

@@ -2,9 +2,15 @@ import type {
   AnswerPayload,
   AppSettings,
   AnswerResponse,
+  ClassifierCheck,
+  ClassifierInput,
+  ClassifierSettings,
+  ClassifyBatch,
+  ClassifyRequest,
   DailyStat,
   ExerciseRound,
   Label,
+  LabelUpdate,
   SelectResponse,
   SessionFinishResult,
   SessionPayload,
@@ -89,6 +95,8 @@ export const api = {
     priority?: boolean
     /** id метки или `none` — слова без меток */
     label?: number | 'none'
+    /** Только записи с `id ≥ fromId` — курсор разметки */
+    fromId?: number | null
     limit?: number
     offset?: number
   }) => {
@@ -97,6 +105,7 @@ export const api = {
     if (params.status) query.set('status', params.status)
     if (params.priority) query.set('priority', 'true')
     if (params.label !== undefined) query.set('label', String(params.label))
+    if (params.fromId) query.set('from_id', String(params.fromId))
     query.set('limit', String(params.limit ?? 50))
     query.set('offset', String(params.offset ?? 0))
     return request<WordPage>(`/words?${query.toString()}`)
@@ -133,21 +142,30 @@ export const api = {
 
   listLabels: () => request<Label[]>('/labels'),
 
-  createLabel: (name: string) =>
+  createLabel: (payload: { name: string; description?: string | null }) =>
     request<Label>('/labels', {
       method: 'POST',
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(payload),
     }),
 
-  renameLabel: ({ id, name }: { id: number; name: string }) =>
+  // Частичная правка: переименование не стирает описание
+  updateLabel: ({ id, ...payload }: LabelUpdate & { id: number }) =>
     request<Label>(`/labels/${id}`, {
       method: 'PATCH',
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(payload),
     }),
 
   // Метка снимается со всех слов; слова и прогресс не меняются
   deleteLabel: (labelId: number) =>
     request<void>(`/labels/${labelId}`, { method: 'DELETE' }),
+
+  // Одна пачка автоматической разметки: модель думает над ней до двух минут.
+  // 502/504 — классификатор недоступен или не ответил, `detail` называет причину
+  classifyBatch: (payload: ClassifyRequest) =>
+    request<ClassifyBatch>('/labels/classify', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 
   overview: () => request<StatsOverview>('/stats/overview'),
 
@@ -158,6 +176,25 @@ export const api = {
   updateSettings: (payload: AppSettings) =>
     request<AppSettings>('/settings', {
       method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  getClassifier: () => request<ClassifierSettings>('/settings/classifier'),
+
+  saveClassifier: (payload: ClassifierInput) =>
+    request<ClassifierSettings>('/settings/classifier', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  // Забывает сохранённое и отдаёт значения по умолчанию
+  resetClassifier: () =>
+    request<ClassifierSettings>('/settings/classifier', { method: 'DELETE' }),
+
+  // Проверяет переданные значения, не сохраняя их
+  checkClassifier: (payload: ClassifierInput) =>
+    request<ClassifierCheck>('/settings/classifier/check', {
+      method: 'POST',
       body: JSON.stringify(payload),
     }),
 }

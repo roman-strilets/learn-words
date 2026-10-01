@@ -25,6 +25,18 @@ class Settings(BaseSettings):
     min_ease: float = 1.3
     initial_ease: float = 2.5
 
+    # Классификатор меток. Адрес, ключ и модель — только значения по умолчанию:
+    # действующие лежат в таблице `settings` и меняются на вкладке «Разметка»
+    classifier_base_url: str = "http://localhost:11434"
+    classifier_api_key: str = "ollama"  # Ollama ключ не проверяет, но SDK требует непустой
+    classifier_model: str = "nimble"
+    # Предел ожидания одной пачки: локальная модель думает над 20 словами десятки секунд
+    classifier_timeout_seconds: float = 120.0
+    # «Проверить подключение» — один крошечный вопрос, висеть две минуты ему незачем
+    classifier_check_timeout_seconds: float = 15.0
+    # Больше — одна пачка не укладывается в таймаут на локальной модели
+    classifier_batch_max: int = 100
+
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     @property

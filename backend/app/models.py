@@ -61,6 +61,9 @@ class Label(Base):
     `name_key` считается в Python (`labels_service.label_key`), потому что
     `lower()` и `NOCASE` в SQLite не знают кириллицы: «Кухня» и «кухня» для
     них разные строки.
+
+    `description` — необязательное пояснение темы для автоматической разметки:
+    классификатор берёт его критерием вместо названия.
     """
 
     __tablename__ = "labels"
@@ -68,6 +71,8 @@ class Label(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(50), nullable=False)
     name_key: Mapped[str] = mapped_column(String(50), nullable=False)
+    # Короткое «B2» модель поймёт хуже, чем «advanced vocabulary (CEFR B2)»
+    description: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     __table_args__ = (Index("ux_labels_name_key", "name_key", unique=True),)

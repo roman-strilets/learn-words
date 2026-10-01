@@ -1,5 +1,6 @@
 """Сквозные проверки API: полный цикл изучения слова и работа со словарём."""
 
+from collections.abc import Callable
 from datetime import timedelta
 
 import pytest
@@ -7,13 +8,23 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.classifier import (
+    ClassifierConfig,
+    ClassifierError,
+    LabelItem,
+    WordItem,
+    get_classifier,
+    get_classifier_factory,
+)
 from app.clock import utcnow
 from app.config import settings
+from app.main import app
 from app.models import (
     ExerciseType,
     Label,
     Progress,
     ReviewLog,
+    Setting,
     Word,
     WordStatus,
     word_labels,
@@ -1533,7 +1544,12 @@ def test_label_is_created(client: TestClient):
 
     # FR-010
     assert created.status_code == 201, created.text
-    assert created.json() == {"id": created.json()["id"], "name": "кухня", "word_count": 0}
+    assert created.json() == {
+        "id": created.json()["id"],
+        "name": "кухня",
+        "description": None,
+        "word_count": 0,
+    }
     assert [label["name"] for label in client.get("/api/labels").json()] == ["кухня"]
 
     # FR-011: регистр не делает метку новой
@@ -1558,7 +1574,12 @@ def test_label_is_renamed(client: TestClient, db_session: Session, words: list[W
 
     # FR-012, SC-003: слова видят новое название, набор слов прежний
     assert renamed.status_code == 200, renamed.text
-    assert renamed.json() == {"id": kitchen.id, "name": "кухня", "word_count": 2}
+    assert renamed.json() == {
+        "id": kitchen.id,
+        "name": "кухня",
+        "description": None,
+        "word_count": 2,
+    }
     for word in words[:2]:
         assert _label_names(client.get(f"/api/words/{word.id}").json()) == ["кухня"]
 
@@ -1606,3 +1627,568 @@ def test_labels_do_not_change_the_sessions(
 
     # SC-006
     assert picked() == before
+
+
+# -------------------------------------------------------- автоматическая разметка
+
+
+class FakeClassifier:
+    """Классификатор без сети: отвечает по таблице «слово → метка».
+
+    Значение таблицы — название метки из набора, id любой метки (в том числе
+    не из набора) или `None` — «ни одна». `during` вызывается «пока модель
+    думает»: так тесты удаляют слово или метку посреди пачки.
+    """
+
+    def __init__(self) -> None:
+        self.table: dict[str, str | int | None] = {}
+        self.calls: list[tuple[list[WordItem], list[LabelItem]]] = []
+        self.error: ClassifierError | None = None
+        self.during: Callable[[], None] | None = None
+
+    def classify(self, words: list[WordItem], labels: list[LabelItem]) -> dict[int, int | None]:
+        self.calls.append((words, labels))
+        if self.during is not None:
+            self.during()
+        if self.error is not None:
+            raise self.error
+        by_name = {label.name: label.id for label in labels}
+        result: dict[int, int | None] = {}
+        for word in words:
+            choice = self.table.get(word.word)
+            result[word.id] = by_name.get(choice) if isinstance(choice, str) else choice
+        return result
+
+    def check(self) -> None:
+        if self.error is not None:
+            raise self.error
+
+
+@pytest.fixture
+def fake(client: TestClient) -> FakeClassifier:
+    classifier = FakeClassifier()
+    app.dependency_overrides[get_classifier] = lambda: classifier
+    return classifier
+
+
+def _add_words(db_session: Session, *pairs: tuple[str, str]) -> list[Word]:
+    now = utcnow()
+    items = [Word(word=w, word_key=w, translation=t, created_at=now) for w, t in pairs]
+    db_session.add_all(items)
+    db_session.commit()
+    return items
+
+
+def _classify(client: TestClient, label_ids: list[int], **extra):
+    payload = {"label_ids": label_ids, "limit": 20, **extra}
+    return client.post("/api/labels/classify", json=payload)
+
+
+def test_classify_puts_the_chosen_label(
+    client: TestClient, db_session: Session, fake: FakeClassifier
+):
+    spoon, bicycle = _add_words(db_session, ("spoon", "ложка"), ("bicycle", "велосипед"))
+    kitchen = _label(db_session, "кухня")
+    body = _label(db_session, "тело")
+    fake.table = {"spoon": "кухня", "bicycle": None}
+
+    response = _classify(client, [kitchen.id, body.id])
+
+    # FR-002, FR-003
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "results": [
+            {
+                "word_id": spoon.id,
+                "word": "spoon",
+                "translation": "ложка",
+                "label": {"id": kitchen.id, "name": "кухня"},
+                "added": True,
+            },
+            {
+                "word_id": bicycle.id,
+                "word": "bicycle",
+                "translation": "велосипед",
+                "label": None,
+                "added": False,
+            },
+        ],
+        "skipped": 0,
+        "next_from_id": None,
+        "remaining": 0,
+    }
+    assert _label_names(client.get(f"/api/words/{spoon.id}").json()) == ["кухня"]
+    assert client.get(f"/api/words/{bicycle.id}").json()["labels"] == []
+
+    # SC-003: повторный запуск ничего не меняет
+    again = _classify(client, [kitchen.id, body.id]).json()
+    assert [result["added"] for result in again["results"]] == [False, False]
+    assert _count(db_session, word_labels) == 1
+
+
+def test_classify_keeps_existing_labels(
+    client: TestClient, db_session: Session, fake: FakeClassifier
+):
+    [spoon] = _add_words(db_session, ("spoon", "ложка"))
+    kitchen = _label(db_session, "кухня", spoon)
+    body = _label(db_session, "тело", spoon)
+    fake.table = {"spoon": "кухня"}
+
+    [result] = _classify(client, [kitchen.id, body.id]).json()["results"]
+
+    # FR-004, SC-003: уже стоявшая метка не «добавлена», чужие не сняты
+    assert result["label"] == {"id": kitchen.id, "name": "кухня"}
+    assert result["added"] is False
+    assert _label_names(client.get(f"/api/words/{spoon.id}").json()) == ["кухня", "тело"]
+    assert _count(db_session, word_labels) == 2
+
+
+def test_classify_ignores_a_label_outside_the_set(
+    client: TestClient, db_session: Session, fake: FakeClassifier
+):
+    [spoon] = _add_words(db_session, ("spoon", "ложка"))
+    kitchen = _label(db_session, "кухня")
+    plants = _label(db_session, "растения")
+    fake.table = {"spoon": plants.id}
+
+    [result] = _classify(client, [kitchen.id]).json()["results"]
+
+    # FR-014
+    assert result["label"] is None
+    assert result["added"] is False
+    assert _count(db_session, word_labels) == 0
+
+
+def test_classify_walks_the_dictionary_in_batches(
+    client: TestClient, db_session: Session, words: list[Word], fake: FakeClassifier
+):
+    kitchen = _label(db_session, "кухня")
+    sizes, remaining, seen = [], [], []
+    from_id = None
+
+    while True:
+        batch = _classify(client, [kitchen.id], limit=5, from_id=from_id).json()
+        sizes.append(len(batch["results"]))
+        remaining.append(batch["remaining"])
+        seen += [result["word_id"] for result in batch["results"]]
+        from_id = batch["next_from_id"]
+        if from_id is None:
+            break
+
+    # FR-011, R4
+    assert sizes == [5, 5, 2]
+    assert remaining == [7, 2, 0]
+    assert seen == sorted(w.id for w in words)
+
+
+@pytest.mark.parametrize("status_code", [502, 504])
+def test_classifier_failure_leaves_the_batch_untouched(
+    client: TestClient,
+    db_session: Session,
+    words: list[Word],
+    fake: FakeClassifier,
+    status_code: int,
+):
+    kitchen = _label(db_session, "кухня")
+    fake.table = {w.word: "кухня" for w in words}
+    fake.error = ClassifierError(status_code, "Сервис разметки недоступен")
+
+    response = _classify(client, [kitchen.id])
+
+    # FR-016, FR-018, SC-005
+    assert response.status_code == status_code
+    assert response.json() == {"detail": "Сервис разметки недоступен"}
+    assert _count(db_session, word_labels) == 0
+
+
+def test_word_deleted_during_classification_is_skipped(
+    client: TestClient, db_session: Session, words: list[Word], fake: FakeClassifier
+):
+    kitchen = _label(db_session, "кухня")
+    fake.table = {w.word: "кухня" for w in words}
+    gone = words[1]
+
+    def delete_word() -> None:
+        db_session.delete(gone)
+        db_session.commit()
+
+    fake.during = delete_word
+
+    response = _classify(client, [kitchen.id], limit=3)
+
+    assert response.status_code == 200, response.text
+    batch = response.json()
+    assert batch["skipped"] == 1
+    assert [result["word_id"] for result in batch["results"]] == [words[0].id, words[2].id]
+    assert all(result["added"] for result in batch["results"])
+
+
+def test_label_deleted_during_classification_is_not_put(
+    client: TestClient, db_session: Session, words: list[Word], fake: FakeClassifier
+):
+    kitchen = _label(db_session, "кухня")
+    body = _label(db_session, "тело")
+    fake.table = {words[0].word: "кухня", words[1].word: "тело"}
+
+    def delete_label() -> None:
+        db_session.delete(kitchen)
+        db_session.commit()
+
+    fake.during = delete_label
+
+    response = _classify(client, [kitchen.id, body.id], limit=2)
+
+    assert response.status_code == 200, response.text
+    first, second = response.json()["results"]
+    assert first["label"] is None
+    assert first["added"] is False
+    assert second["label"] == {"id": body.id, "name": "тело"}
+    assert second["added"] is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"label_ids": []},
+        {"limit": 0},
+        {"limit": settings.classifier_batch_max + 1},
+        {"from_id": 0},
+        {"status": "bogus"},
+        {"label": "abc"},
+    ],
+)
+def test_classify_rejects_bad_requests(
+    client: TestClient, db_session: Session, words: list[Word], fake: FakeClassifier, payload
+):
+    kitchen = _label(db_session, "кухня")
+
+    body = {"label_ids": [kitchen.id], "limit": 20, **payload}
+    response = client.post("/api/labels/classify", json=body)
+
+    # FR-010, FR-012
+    assert response.status_code == 422
+    assert fake.calls == []
+
+
+def test_classify_needs_an_existing_label(
+    client: TestClient, db_session: Session, words: list[Word], fake: FakeClassifier
+):
+    kitchen = _label(db_session, "кухня")
+    client.delete(f"/api/labels/{kitchen.id}")
+
+    response = _classify(client, [kitchen.id, 9999])
+
+    # FR-010
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Нет меток для разметки"}
+    assert fake.calls == []
+
+
+def test_classify_with_nothing_to_do(
+    client: TestClient, db_session: Session, words: list[Word], fake: FakeClassifier
+):
+    kitchen = _label(db_session, "кухня")
+
+    response = _classify(client, [kitchen.id], search="нет такого слова")
+
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "skipped": 0, "next_from_id": None, "remaining": 0}
+    assert fake.calls == []
+
+
+def _snapshot(db_session: Session, model) -> list[tuple]:
+    db_session.expire_all()
+    columns = model.__table__.columns
+    rows = db_session.scalars(select(model).order_by(*model.__table__.primary_key.columns))
+    return [tuple(getattr(row, column.key) for column in columns) for row in rows]
+
+
+def test_classification_is_not_an_answer(
+    client: TestClient, db_session: Session, words: list[Word], fake: FakeClassifier
+):
+    kitchen = _label(db_session, "кухня")
+    started = _start(client, 2)
+    db_session.add(
+        ReviewLog(
+            word_id=started[0],
+            exercise=ExerciseType.LETTERS,
+            correct=True,
+            status_before=WordStatus.LEARNING,
+            status_after=WordStatus.LEARNING,
+            ease_after=2.5,
+            interval_after=0.0,
+        )
+    )
+    db_session.commit()
+    fake.table = {w.word: "кухня" for w in words}
+    before = [_snapshot(db_session, model) for model in (Word, Progress, ReviewLog)]
+
+    batch = _classify(client, [kitchen.id], limit=100).json()
+
+    # FR-008, SC-004
+    assert all(result["added"] for result in batch["results"])
+    assert [_snapshot(db_session, model) for model in (Word, Progress, ReviewLog)] == before
+
+
+def test_classifier_gets_label_descriptions(
+    client: TestClient, db_session: Session, words: list[Word], fake: FakeClassifier
+):
+    kitchen = _label(db_session, "кухня")
+    kitchen.description = "kitchen utensils and appliances"
+    db_session.commit()
+    body = _label(db_session, "тело")
+
+    _classify(client, [kitchen.id, body.id], limit=1)
+
+    # FR-007a
+    [(sent_words, sent_labels)] = fake.calls
+    first = words[0]
+    assert sent_words == [WordItem(id=first.id, word=first.word, translation=first.translation)]
+    assert {label.name: label.description for label in sent_labels} == {
+        "кухня": "kitchen utensils and appliances",
+        "тело": None,
+    }
+
+
+def test_words_from_id(client: TestClient, words: list[Word]):
+    start = words[4].id
+
+    page = client.get("/api/words", params={"from_id": start, "limit": 1}).json()
+
+    # FR-013: курсор считает только записи с id ≥ from_id и складывается с фильтрами
+    assert page["total"] == len(words) - 4
+    assert page["items"][0]["id"] == start
+    assert _ids(client, from_id=start, search="out") == {
+        w.id for w in words[4:] if "out" in w.word
+    }
+    assert client.get("/api/words", params={"from_id": 0}).status_code == 422
+
+
+def test_unlabeled_filter_does_not_shift_the_cursor(
+    client: TestClient, db_session: Session, words: list[Word], fake: FakeClassifier
+):
+    kitchen = _label(db_session, "кухня")
+    fake.table = {w.word: "кухня" for w in words}
+    seen: list[int] = []
+    from_id = None
+
+    while True:
+        batch = _classify(client, [kitchen.id], label="none", limit=5, from_id=from_id).json()
+        seen += [result["word_id"] for result in batch["results"]]
+        from_id = batch["next_from_id"]
+        if from_id is None:
+            break
+
+    # R4: размеченные слова выпадают из «Без меток», но они позади курсора —
+    # ни одно слово не пропущено и не обработано дважды
+    assert seen == [w.id for w in words]
+    assert _count(db_session, word_labels) == len(words)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"status": "new"},
+        {"status": "learning"},
+        {"search": "out"},
+        {"priority": True},
+        {"label": "none"},
+        {"label": "kitchen"},
+    ],
+)
+def test_classify_selects_what_the_dictionary_shows(
+    client: TestClient, db_session: Session, words: list[Word], fake: FakeClassifier, params
+):
+    kitchen = _label(db_session, "кухня", words[0], words[3], words[8])
+    _start(client, 3)
+    _raise(client, words[10].id)
+    _raise(client, words[11].id)
+    if params.get("label") == "kitchen":
+        params = {"label": kitchen.id}
+
+    listed = [
+        item["id"]
+        for item in client.get("/api/words", params={**params, "limit": 200}).json()["items"]
+    ]
+    batch = _classify(client, [kitchen.id], limit=100, **params).json()
+
+    # R3: разметка и список отбирают одни и те же слова
+    assert listed
+    assert [result["word_id"] for result in batch["results"]] == listed
+
+
+# ------------------------------------------------- настройки классификатора
+
+
+@pytest.fixture
+def factory(client: TestClient):
+    """Фабрика классификатора, запоминающая, с какими настройками её позвали."""
+
+    class Factory:
+        def __init__(self) -> None:
+            self.fake = FakeClassifier()
+            self.calls: list[tuple[ClassifierConfig, float]] = []
+
+        def __call__(self, config: ClassifierConfig, timeout: float) -> FakeClassifier:
+            self.calls.append((config, timeout))
+            return self.fake
+
+    made = Factory()
+    app.dependency_overrides[get_classifier_factory] = lambda: made
+    return made
+
+
+DEFAULT_CLASSIFIER = {
+    "base_url": settings.classifier_base_url,
+    "api_key": settings.classifier_api_key,
+    "model": settings.classifier_model,
+}
+CUSTOM_CLASSIFIER = {
+    "base_url": "https://models.example.com",
+    "api_key": "sk-123",
+    "model": "bigger",
+}
+
+
+def _classifier_rows(db_session: Session) -> list[str]:
+    db_session.expire_all()
+    return list(db_session.scalars(select(Setting.key).where(Setting.key.like("classifier_%"))))
+
+
+def test_classifier_settings_default_save_and_reset(client: TestClient, db_session: Session):
+    # FR-020, FR-021
+    assert client.get("/api/settings/classifier").json() == {
+        **DEFAULT_CLASSIFIER,
+        "is_default": True,
+    }
+
+    saved = client.put("/api/settings/classifier", json=CUSTOM_CLASSIFIER)
+    assert saved.status_code == 200, saved.text
+    assert saved.json() == {**CUSTOM_CLASSIFIER, "is_default": False}
+    assert client.get("/api/settings/classifier").json() == {
+        **CUSTOM_CLASSIFIER,
+        "is_default": False,
+    }
+
+    # FR-022: сброс удаляет строки, а не записывает значения по умолчанию
+    reset = client.delete("/api/settings/classifier")
+    assert reset.status_code == 200
+    assert reset.json() == {**DEFAULT_CLASSIFIER, "is_default": True}
+    assert _classifier_rows(db_session) == []
+
+
+def test_classifier_settings_are_trimmed(client: TestClient):
+    payload = {"base_url": " http://localhost:11434 ", "api_key": " ollama ", "model": " nimble "}
+
+    saved = client.put("/api/settings/classifier", json=payload).json()
+
+    assert saved == {**DEFAULT_CLASSIFIER, "is_default": False}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"base_url": "ftp://x"},
+        {"base_url": "localhost:11434"},
+        {"base_url": "http://" + "x" * 506},
+        {"model": ""},
+        {"model": "   "},
+        {"model": "m" * 129},
+        {"api_key": ""},
+        {"api_key": "with space"},
+        {"api_key": "ключ"},
+    ],
+)
+def test_bad_classifier_settings_are_rejected(
+    client: TestClient, db_session: Session, factory, change: dict
+):
+    payload = {**CUSTOM_CLASSIFIER, **change}
+
+    assert client.put("/api/settings/classifier", json=payload).status_code == 422
+    assert client.post("/api/settings/classifier/check", json=payload).status_code == 422
+    assert _classifier_rows(db_session) == []
+    assert factory.calls == []
+
+
+def test_classifier_check_uses_the_unsaved_values(client: TestClient, db_session: Session, factory):
+    response = client.post("/api/settings/classifier/check", json=CUSTOM_CLASSIFIER)
+
+    # FR-022: проверка не сохраняет и идёт с коротким таймаутом
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "detail": "Модель отвечает"}
+    assert factory.calls == [
+        (ClassifierConfig(**CUSTOM_CLASSIFIER), settings.classifier_check_timeout_seconds)
+    ]
+    assert _classifier_rows(db_session) == []
+
+
+def test_classifier_check_reports_a_failure(client: TestClient, factory):
+    factory.fake.error = ClassifierError(502, "Модель «nimbel» не найдена")
+
+    response = client.post(
+        "/api/settings/classifier/check", json={**CUSTOM_CLASSIFIER, "model": "nimbel"}
+    )
+
+    # Неудача проверки — ответ, а не ошибка запроса
+    assert response.status_code == 200
+    assert response.json() == {"ok": False, "detail": "Модель «nimbel» не найдена"}
+
+
+def test_classify_uses_the_saved_settings(
+    client: TestClient, db_session: Session, words: list[Word], factory, monkeypatch
+):
+    # SC-007: переменные окружения SDK ничего не перебивают
+    monkeypatch.setenv("TYPESAFE_DEFAULT_MODEL", "other")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", "http://elsewhere.test")
+    kitchen = _label(db_session, "кухня")
+    client.put("/api/settings/classifier", json=CUSTOM_CLASSIFIER)
+
+    _classify(client, [kitchen.id], limit=1)
+    client.delete("/api/settings/classifier")
+    _classify(client, [kitchen.id], limit=1)
+
+    assert factory.calls == [
+        (ClassifierConfig(**CUSTOM_CLASSIFIER), settings.classifier_timeout_seconds),
+        (ClassifierConfig(**DEFAULT_CLASSIFIER), settings.classifier_timeout_seconds),
+    ]
+
+
+def test_label_description(client: TestClient, db_session: Session):
+    created = client.post(
+        "/api/labels", json={"name": "B2", "description": " advanced vocabulary (CEFR B2) "}
+    )
+
+    # FR-007a
+    assert created.status_code == 201, created.text
+    label_id = created.json()["id"]
+    described = {
+        "id": label_id,
+        "name": "B2",
+        "description": "advanced vocabulary (CEFR B2)",
+        "word_count": 0,
+    }
+    assert created.json() == described
+    assert client.get("/api/labels").json() == [described]
+
+    # R9: переименование описание не трогает
+    renamed = client.patch(f"/api/labels/{label_id}", json={"name": "C1"}).json()
+    assert renamed["description"] == "advanced vocabulary (CEFR B2)"
+
+    changed = client.patch(f"/api/labels/{label_id}", json={"description": "upper level"})
+    assert changed.json() == {**described, "name": "C1", "description": "upper level"}
+
+    # Пустое описание — его отсутствие
+    cleared = client.patch(f"/api/labels/{label_id}", json={"description": "  "}).json()
+    assert cleared["description"] is None
+    assert cleared["name"] == "C1"
+    assert client.patch(f"/api/labels/{label_id}", json={"description": None}).status_code == 200
+
+
+def test_bad_label_description_is_rejected(client: TestClient, db_session: Session):
+    label = _label(db_session, "кухня")
+
+    too_long = {"description": "x" * 201}
+    assert client.post("/api/labels", json={"name": "a", **too_long}).status_code == 422
+    assert client.patch(f"/api/labels/{label.id}", json=too_long).status_code == 422
+    # Частичное обновление без единого поля — ошибка, а не тихий успех
+    assert client.patch(f"/api/labels/{label.id}", json={}).status_code == 422
