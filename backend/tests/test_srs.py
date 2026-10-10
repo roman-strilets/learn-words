@@ -142,11 +142,13 @@ def test_known_word_is_frozen():
 
 
 def test_exercise_rounds_are_fixed_and_skip_the_intro_card():
-    # FR-006: порядок раундов задан спецификацией, один на оба режима занятия
+    # FR-002: пять раундов в порядке спецификации, один на оба режима занятия;
+    # написание по переводу идёт предпоследним, перед диктантом
     assert EXERCISE_ROUNDS == (
         ExerciseType.CHOICE_RU_EN,
         ExerciseType.CHOICE_EN_RU,
         ExerciseType.LETTERS,
+        ExerciseType.WRITING_RU_EN,
         ExerciseType.DICTATION,
     )
     # FR-007: карточка-знакомство в раундах не участвует

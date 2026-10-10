@@ -38,6 +38,7 @@ class ExerciseType(StrEnum):
     CHOICE_RU_EN = "choice_ru_en"
     CHOICE_EN_RU = "choice_en_ru"
     LETTERS = "letters"
+    WRITING_RU_EN = "writing_ru_en"
     DICTATION = "dictation"
 
 

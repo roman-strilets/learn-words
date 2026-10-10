@@ -344,6 +344,15 @@ class LettersExercise(BaseModel):
     hint: str | None = None
 
 
+class WritingRuEnExercise(BaseModel):
+    """Показан русский перевод, надо написать английское слово. Подсказки и ответа
+    в карточке нет: вспомнить слово без опоры — и есть задание."""
+
+    type: Literal[ExerciseType.WRITING_RU_EN] = ExerciseType.WRITING_RU_EN
+    word_id: int
+    prompt: str
+
+
 class DictationExercise(BaseModel):
     """Слово произносится через Web Speech API, надо записать услышанное."""
 
@@ -356,7 +365,11 @@ class DictationExercise(BaseModel):
 # Карточка-знакомство сюда не входит: знакомство идёт по слову целиком,
 # до раундов, и упражнением никогда не приходит (FR-007)
 Exercise = Annotated[
-    ChoiceRuEnExercise | ChoiceEnRuExercise | LettersExercise | DictationExercise,
+    ChoiceRuEnExercise
+    | ChoiceEnRuExercise
+    | LettersExercise
+    | WritingRuEnExercise
+    | DictationExercise,
     Field(discriminator="type"),
 ]
 

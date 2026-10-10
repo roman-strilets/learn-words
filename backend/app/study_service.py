@@ -30,6 +30,7 @@ from app.schemas import (
 )
 from app.srs import (
     EXERCISE_ROUNDS,
+    EXERCISES_WITHOUT_HINT,
     AttemptOutcome,
     SrsState,
     apply_answer,
@@ -410,7 +411,7 @@ def answer_exercise(
 
     Режимы здесь не расходятся: оба только пишут попытку в журнал. Расписание
     внутри занятия неподвижно — слово получает по упражнению в каждом из
-    четырёх раундов, и одно обновление на все четыре ставит `finish`.
+    раундов, и одно обновление на все раунды ставит `finish`.
     """
     rng = rng or random.Random()
     if word.progress is None:
@@ -418,7 +419,8 @@ def answer_exercise(
 
     before = state_from_progress(word.progress)
     correct = check_answer(word, request.exercise, request.answer)
-    quality = derive_quality(correct=correct, used_hint=request.used_hint, attempt=request.attempt)
+    used_hint = request.used_hint and request.exercise not in EXERCISES_WITHOUT_HINT
+    quality = derive_quality(correct=correct, used_hint=used_hint, attempt=request.attempt)
 
     repeat = not correct
     # Повтор после ошибки — тот же тип, но карточка собирается заново:
@@ -442,7 +444,7 @@ def answer_exercise(
         exercise=request.exercise,
         correct=correct,
         answer=request.answer,
-        used_hint=request.used_hint,
+        used_hint=used_hint,
         attempt=request.attempt,
         quality=quality,
         duration_ms=request.duration_ms,
@@ -478,8 +480,8 @@ def finish_session(
     """Подвести итог занятия и один раз пересчитать расписание слов.
 
     Оценку выводит сервер, а не клиент: попытки занятия лежат в `review_log`
-    под своим `session_id`, и по ним видно и то, прошло ли слово все четыре
-    раунда, и была ли по нему ошибка.
+    под своим `session_id`, и по ним видно и то, прошло ли слово все
+    раунды, и была ли по нему ошибка.
 
     Режимы расходятся ровно в одном — как из состояния слова получается новое.
     Повторение считает итог по худшей попытке: ошибка означает, что слово

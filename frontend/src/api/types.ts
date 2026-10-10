@@ -3,6 +3,7 @@ export type ExerciseType =
   | 'choice_ru_en'
   | 'choice_en_ru'
   | 'letters'
+  | 'writing_ru_en'
   | 'dictation'
 
 export type WordStatus = 'learning' | 'review' | 'known' | 'suspended'
@@ -130,6 +131,13 @@ export interface LettersExercise {
   hint: string | null
 }
 
+/** Ответа и подсказки в карточке нет — их не во что подсмотреть. */
+export interface WritingRuEnExercise {
+  type: 'writing_ru_en'
+  word_id: number
+  prompt: string
+}
+
 export interface DictationExercise {
   type: 'dictation'
   word_id: number
@@ -141,7 +149,11 @@ export interface DictationExercise {
  * Карточка-знакомство сюда не входит: знакомство идёт по слову целиком,
  * до раундов, и упражнением никогда не приходит.
  */
-export type Exercise = ChoiceExercise | LettersExercise | DictationExercise
+export type Exercise =
+  | ChoiceExercise
+  | LettersExercise
+  | WritingRuEnExercise
+  | DictationExercise
 
 export interface SessionCounts {
   new: number
@@ -166,7 +178,7 @@ export interface SessionPayload {
   /** Заполнено в режиме `learn` */
   new_words: Word[]
   /**
-   * Заполнено в режиме `review`: четыре раунда в фиксированном порядке.
+   * Заполнено в режиме `review`: все раунды в фиксированном порядке.
    * План изучения приходит отдельно, из `buildRounds`: его состав известен
    * только после знакомства.
    */

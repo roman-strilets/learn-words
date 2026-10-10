@@ -597,13 +597,15 @@ def test_stats_daily_covers_requested_window(client: TestClient, words: list[Wor
 # ------------------------------------------------- занятие-повторение раундами
 
 
-def test_review_session_is_a_plan_of_four_rounds(client: TestClient, words: list[Word]):
+def test_review_session_is_a_plan_of_five_rounds(client: TestClient, words: list[Word]):
     started = _start(client)
 
     body = _session(client, "review")
 
     assert body["session_id"]
     assert [r["exercise"] for r in body["rounds"]] == list(EXERCISE_ROUNDS)
+    # FR-002: написание по переводу идёт четвёртым, перед диктантом
+    assert body["rounds"][3]["exercise"] == ExerciseType.WRITING_RU_EN
     for round_ in body["rounds"]:
         # В раунде — по одному упражнению своего типа на каждое слово занятия
         assert {e["word_id"] for e in round_["exercises"]} == set(started)
@@ -642,13 +644,13 @@ def test_review_session_is_empty_without_due_words(client: TestClient, words: li
     assert body["session_id"] is None
 
 
-def test_review_plan_holds_four_exercises_per_word(client: TestClient, words: list[Word]):
+def test_review_plan_holds_an_exercise_per_round_per_word(client: TestClient, words: list[Word]):
     started = _start(client)
 
     body = _session(client, "review")
     exercises = _round_exercises(body["rounds"])
 
-    # SC-001, SC-002: занятие — это «слов × 4», сгруппированных по типу
+    # SC-001, SC-002: занятие — это «слов × раундов», сгруппированных по типу
     assert len(exercises) == len(started) * len(EXERCISE_ROUNDS)
     assert [r["exercise"] for r in body["rounds"]] == list(EXERCISE_ROUNDS)
 
@@ -700,7 +702,7 @@ def test_finish_moves_the_schedule_once_for_a_clean_session(
     for round_ in body["rounds"]:
         _play_round(client, session_id, round_, answers)
 
-    # Четыре раунда позади, а расписание всё ещё прежнее
+    # Все раунды позади, а расписание всё ещё прежнее
     db_session.expire_all()
     assert all(db_session.get(Progress, w).due_at < utcnow() for w in started)
 
@@ -732,7 +734,7 @@ def test_finish_is_idempotent_and_skips_unfinished_words(
     session_id = body["session_id"]
     done, abandoned = started
 
-    # Первое слово проходит все четыре раунда, второе — только первый
+    # Первое слово проходит все раунды, второе — только первый
     for index, round_ in enumerate(body["rounds"]):
         for exercise in round_["exercises"]:
             if exercise["word_id"] == abandoned and index > 0:
@@ -765,6 +767,119 @@ def test_finish_is_idempotent_and_skips_unfinished_words(
     assert _finish(client, session_id) == []
     db_session.expire_all()
     assert db_session.get(Progress, done).due_at == settled
+
+
+def test_finish_skips_a_word_that_missed_the_writing_round(
+    client: TestClient, db_session: Session, words: list[Word]
+):
+    started = _start(client, 2)
+    answers = _answers_of(words, started)
+    _release(db_session, started)
+    body = _session(client, "review")
+    session_id = body["session_id"]
+    done, skipped = started
+
+    # Первое слово проходит все раунды, второе — все, кроме написания по переводу
+    for round_ in body["rounds"]:
+        for exercise in round_["exercises"]:
+            if exercise["word_id"] == skipped and round_["exercise"] == ExerciseType.WRITING_RU_EN:
+                continue
+            _answer(
+                client,
+                exercise["word_id"],
+                round_["exercise"],
+                answers[exercise["word_id"]][round_["exercise"]],
+                mode="review",
+                session_id=session_id,
+            )
+
+    db_session.expire_all()
+    untouched = db_session.get(Progress, skipped)
+    snapshot = (untouched.status, untouched.due_at, untouched.step, untouched.updated_at)
+
+    results = _finish(client, session_id)
+
+    # FR-008, SC-005: без нового раунда расписание слова не двигается
+    assert [r["word_id"] for r in results] == [done]
+    db_session.expire_all()
+    after = db_session.get(Progress, skipped)
+    assert (after.status, after.due_at, after.step, after.updated_at) == snapshot
+
+
+def test_wrong_writing_answer_repeats_the_same_card(
+    client: TestClient, db_session: Session, words: list[Word]
+):
+    word_id = _start(client, 1)[0]
+    word = db_session.get(Word, word_id)
+    session_id = _session(client, "review")["session_id"]
+
+    result = _answer(
+        client,
+        word_id,
+        ExerciseType.WRITING_RU_EN,
+        word.word + "x",
+        mode="review",
+        session_id=session_id,
+    )
+
+    # FR-006: перемешивать в карточке нечего, к повтору приходит та же самая
+    assert result["correct"] is False
+    assert result["correct_answer"] == word.word
+    assert result["next_exercise"] == {
+        "type": ExerciseType.WRITING_RU_EN,
+        "word_id": word_id,
+        "prompt": word.translation,
+    }
+
+
+def test_writing_ignores_a_claimed_hint(
+    client: TestClient, db_session: Session, words: list[Word]
+):
+    word_id = _start(client, 1)[0]
+    word = db_session.get(Word, word_id)
+    session_id = _session(client, "review")["session_id"]
+
+    for exercise in (ExerciseType.WRITING_RU_EN, ExerciseType.LETTERS):
+        _answer(
+            client,
+            word_id,
+            exercise,
+            word.word,
+            mode="review",
+            session_id=session_id,
+            used_hint=True,
+            attempt=1,
+        )
+
+    logged = {
+        log.exercise: log
+        for log in db_session.scalars(
+            select(ReviewLog).where(ReviewLog.session_id == session_id)
+        )
+    }
+    # FR-007: у карточки нет подсказки, и оценку за неё не снижают
+    assert logged[ExerciseType.WRITING_RU_EN].used_hint is False
+    assert logged[ExerciseType.WRITING_RU_EN].quality == 5
+    # Для упражнений с подсказкой всё по-прежнему
+    assert logged[ExerciseType.LETTERS].used_hint is True
+    assert logged[ExerciseType.LETTERS].quality == 4
+
+
+def test_session_plan_does_not_leak_the_writing_answer(
+    client: TestClient, db_session: Session, words: list[Word]
+):
+    started = _start(client)
+    spellings = {word_id: db_session.get(Word, word_id).word for word_id in started}
+
+    plans = [_session(client, "review")["rounds"], _rounds(client, started)]
+
+    for rounds in plans:
+        cards = [e for e in _round_exercises(rounds) if e["type"] == ExerciseType.WRITING_RU_EN]
+        assert {card["word_id"] for card in cards} == set(started)
+        for card in cards:
+            # Ответ в браузер до проверки не уходит (contracts/api.md)
+            assert card.keys() == {"type", "word_id", "prompt"}
+            assert spellings[card["word_id"]] not in card.values()
 
 
 @pytest.mark.parametrize("mode", ["learn", "review"])
@@ -999,7 +1114,7 @@ def test_wrong_learn_answer_repeats_the_same_type(
     assert (progress.status, progress.step) == (WordStatus.LEARNING, 0)
 
 
-def test_a_clean_learn_session_is_four_rounds_of_five(
+def test_a_clean_learn_session_is_five_rounds_of_five(
     client: TestClient, words: list[Word]
 ):
     session_id, started = _learn_session(client)
@@ -1010,9 +1125,9 @@ def test_a_clean_learn_session_is_four_rounds_of_five(
         _play_round(client, session_id, round_, answers, mode="learn") for round_ in rounds
     )
 
-    # SC-001, SC-003: 20 карточек упражнений — по слову в каждом из четырёх
+    # SC-001, SC-003: 25 карточек упражнений — по слову в каждом из пяти
     # раундов, и тип меняется только на границе раунда
-    assert shown == len(started) * len(EXERCISE_ROUNDS) == 20
+    assert shown == len(started) * len(EXERCISE_ROUNDS) == 25
     assert [r["exercise"] for r in rounds] == list(EXERCISE_ROUNDS)
     assert all(len(round_["exercises"]) == len(started) for round_ in rounds)
     assert ExerciseType.INTRO not in {e["type"] for e in _round_exercises(rounds)}
@@ -1026,7 +1141,7 @@ def test_learn_finish_releases_a_word_that_passed_every_round(
     rounds = _rounds(client, started)
     done, abandoned = started
 
-    # Первое слово проходит все четыре раунда, второе — только первый
+    # Первое слово проходит все раунды, второе — только первый
     for index, round_ in enumerate(rounds):
         for exercise in round_["exercises"]:
             word_id = exercise["word_id"]
@@ -1047,7 +1162,7 @@ def test_learn_finish_releases_a_word_that_passed_every_round(
 
     results = _finish(client, session_id, mode="learn")
 
-    # FR-015: слово, прошедшее четыре раунда, выпускается в повторения
+    # FR-015: слово, прошедшее все раунды, выпускается в повторения
     assert [r["word_id"] for r in results] == [done]
     assert results[0]["progress"]["status"] == WordStatus.REVIEW
     assert results[0]["progress"]["repetitions"] == 1

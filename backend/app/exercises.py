@@ -22,6 +22,7 @@ from app.schemas import (
     DictationExercise,
     Exercise,
     LettersExercise,
+    WritingRuEnExercise,
 )
 
 OPTIONS_COUNT = 4
@@ -260,6 +261,9 @@ def build_exercise(
             audio_text=word.word,
             hint=word.translation,
         )
+
+    if exercise_type == ExerciseType.WRITING_RU_EN:
+        return WritingRuEnExercise(word_id=word.id, prompt=word.translation)
 
     distractors = pick_distractor_words(session, word, rng=rng)
 

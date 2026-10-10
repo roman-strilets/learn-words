@@ -11,6 +11,7 @@ from app.exercises import (
     build_letter_bank,
     build_mask,
     check_answer,
+    correct_answer_for,
     normalize_answer,
     order_round,
     pick_distractor_words,
@@ -234,6 +235,16 @@ def test_dictation_exercise_carries_audio_and_hint(db_session: Session, words: l
     assert exercise.hint == "сдвинуть с места"
 
 
+def test_writing_exercise_shows_translation_only(db_session: Session, words: list[Word]):
+    target = next(w for w in words if w.word == "budge")
+    exercise = build_exercise(db_session, target, ExerciseType.WRITING_RU_EN, rng=random.Random(0))
+
+    assert exercise.type == ExerciseType.WRITING_RU_EN
+    assert exercise.prompt == "сдвинуть с места"
+    # FR-003: ни подсказки, ни ответа — в карточке нечего подсмотреть
+    assert exercise.model_dump().keys() == {"type", "word_id", "prompt"}
+
+
 @pytest.mark.parametrize(
     ("exercise_type", "answer", "expected"),
     [
@@ -243,6 +254,12 @@ def test_dictation_exercise_carries_audio_and_hint(db_session: Session, words: l
         (ExerciseType.DICTATION, "bulge", False),
         (ExerciseType.DICTATION, "", False),
         (ExerciseType.DICTATION, None, False),
+        (ExerciseType.WRITING_RU_EN, "budge", True),
+        (ExerciseType.WRITING_RU_EN, " BUDGE ", True),
+        (ExerciseType.WRITING_RU_EN, "to budge", True),
+        (ExerciseType.WRITING_RU_EN, "bulge", False),
+        (ExerciseType.WRITING_RU_EN, "", False),
+        (ExerciseType.WRITING_RU_EN, None, False),
         (ExerciseType.LETTERS, "BUDGE", True),
         (ExerciseType.CHOICE_RU_EN, "budge", True),
         (ExerciseType.CHOICE_EN_RU, "сдвинуть с места", True),
@@ -264,6 +281,17 @@ def test_check_answer_accepts_any_merged_translation(db_session: Session):
     assert check_answer(word, ExerciseType.CHOICE_EN_RU, "лепешечка") is True
     assert check_answer(word, ExerciseType.CHOICE_EN_RU, "котлета; лепешечка") is True
     assert check_answer(word, ExerciseType.CHOICE_EN_RU, "суп") is False
+
+
+def test_writing_rejects_a_synonym_with_the_same_translation(db_session: Session):
+    big = Word(word="big", word_key="big", translation="большой")
+    large = Word(word="large", word_key="large", translation="большой")
+    db_session.add_all([big, large])
+    db_session.flush()
+
+    # Засчитывается только слово карточки, а после ответа видно, какое ждали
+    assert check_answer(big, ExerciseType.WRITING_RU_EN, "large") is False
+    assert correct_answer_for(big, ExerciseType.WRITING_RU_EN) == "big"
 
 
 def test_hints_are_filled_per_exercise_type(db_session: Session, words: list[Word]):

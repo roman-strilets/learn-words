@@ -2,6 +2,7 @@ import type { Exercise } from '../../api/types'
 import { ChoiceCard } from './ChoiceCard'
 import { DictationCard } from './DictationCard'
 import { LettersCard } from './LettersCard'
+import { WritingCard } from './WritingCard'
 import type { AnswerSubmit } from './types'
 
 interface Props {
@@ -28,6 +29,15 @@ export function ExerciseView({ exercise, onAnswer, locked }: Props) {
       return (
         <LettersCard
           key={`${exercise.word_id}-letters`}
+          exercise={exercise}
+          onAnswer={onAnswer}
+          locked={locked}
+        />
+      )
+    case 'writing_ru_en':
+      return (
+        <WritingCard
+          key={`${exercise.word_id}-writing_ru_en`}
           exercise={exercise}
           onAnswer={onAnswer}
           locked={locked}
