@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useState, useRef } from 'react'
 import { useMutation } from '@tanstack/react-query'
 
-import { api } from '../api/client'
-import type { ExerciseRound, SessionPayload, Word } from '../api/types'
+import { deckApi } from '../api/client'
+import type { Deck, ExerciseRound, SessionPayload, Word } from '../api/types'
 import { RoundsRunner } from './RoundsRunner'
 import { IntroCard } from './exercises/IntroCard'
 import { Button, ErrorBox, Spinner } from './ui'
 
 interface Props {
+  /** Колода занятия: от неё зависят только маршруты API */
+  deck?: Deck
   session: SessionPayload
   /** Ключ занятия: занятие без слов до этого компонента не доходит */
   sessionId: string
@@ -22,7 +24,8 @@ interface Props {
  * одним вызовом после последней карточки знакомства, а дальше занятие ведёт
  * тот же `RoundsRunner`, что и повторение.
  */
-export function StudySession({ session, sessionId, onFinished }: Props) {
+export function StudySession({ deck = 'words', session, sessionId, onFinished }: Props) {
+  const client = deckApi(deck)
   const [introIndex, setIntroIndex] = useState(0)
   // Список знакомства пополняется на ходу: «Уже знаю» добирает слово взамен
   const [introWords, setIntroWords] = useState<Word[]>(session.new_words)
@@ -45,7 +48,7 @@ export function StudySession({ session, sessionId, onFinished }: Props) {
       wordId: number
       action: 'learn' | 'know'
       excludeIds: number[]
-    }) => api.select(wordId, action, excludeIds),
+    }) => client.select(wordId, action, excludeIds),
     onSuccess: (data, variables) => {
       if (variables.action === 'learn') {
         setLearnedIds((ids) => [...ids, variables.wordId])
@@ -62,7 +65,7 @@ export function StudySession({ session, sessionId, onFinished }: Props) {
   })
 
   const roundsMutation = useMutation({
-    mutationFn: (wordIds: number[]) => api.buildRounds(wordIds),
+    mutationFn: (wordIds: number[]) => client.buildRounds(wordIds),
     onSuccess: setRounds,
   })
 
@@ -101,6 +104,7 @@ export function StudySession({ session, sessionId, onFinished }: Props) {
     if (rounds && rounds.length > 0) {
       return (
         <RoundsRunner
+          deck={deck}
           rounds={rounds}
           sessionId={sessionId}
           mode="learn"

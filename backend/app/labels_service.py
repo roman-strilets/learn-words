@@ -1,7 +1,8 @@
-"""Метки слов: ключ названия, порядок и список со счётчиками.
+"""Метки слов и фраз: ключ названия, порядок и список со счётчиками.
 
 Метки — ручная разметка словаря. К занятиям и расписанию они отношения не
-имеют, поэтому живут отдельно от `study_service.py`.
+имеют, поэтому живут отдельно от `study_service.py`. У каждой колоды свои
+метки (`deck.label`, `deck.links`); автоматическая разметка — только у слов.
 """
 
 from __future__ import annotations
@@ -10,7 +11,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.classifier import Classifier, LabelItem, WordItem
-from app.models import Label, Word, word_labels
+from app.decks import WORDS, Deck
+from app.models import Label, PhraseLabel, Word
 from app.schemas import ClassifyBatch, ClassifyRequest, ClassifyResult, LabelOut, LabelRef
 from app.word_filters import count_rows, filtered_words
 
@@ -34,24 +36,27 @@ def label_sort_key(key: str) -> str:
     return key.replace("ё", "е")
 
 
-def list_labels(session: Session) -> list[LabelOut]:
-    """Все метки по алфавиту с числом слов у каждой."""
+def list_labels(session: Session, deck: Deck = WORDS) -> list[LabelOut]:
+    """Все метки колоды по алфавиту с числом записей у каждой."""
+    Lbl, links = deck.label, deck.links
     rows = session.execute(
-        select(Label, func.count(word_labels.c.word_id))
-        .outerjoin(word_labels, word_labels.c.label_id == Label.id)
-        .group_by(Label.id)
+        select(Lbl, func.count(deck.link_item_id))
+        .outerjoin(links, links.c.label_id == Lbl.id)
+        .group_by(Lbl.id)
     ).all()
     rows.sort(key=lambda row: label_sort_key(row[0].name_key))
     return [label_out(label, count) for label, count in rows]
 
 
-def label_out(label: Label, count: int) -> LabelOut:
+def label_out(label: Label | PhraseLabel, count: int) -> LabelOut:
     return LabelOut(
         id=label.id, name=label.name, description=label.description, word_count=count
     )
 
 
-def resolve_labels(session: Session, names: list[str]) -> list[Label]:
+def resolve_labels(
+    session: Session, names: list[str], deck: Deck = WORDS
+) -> list[Label | PhraseLabel]:
     """Метки по названиям из формы слова: существующие берутся, недостающие создаются.
 
     Совпадение по ключу берёт существующую метку с её написанием: переименование
@@ -63,13 +68,14 @@ def resolve_labels(session: Session, names: list[str]) -> list[Label]:
     for name in names:
         wanted.setdefault(label_key(name), name.strip())
 
+    Lbl = deck.label
     found = {
         label.name_key: label
-        for label in session.scalars(select(Label).where(Label.name_key.in_(wanted)))
+        for label in session.scalars(select(Lbl).where(Lbl.name_key.in_(wanted)))
     }
     for key, name in wanted.items():
         if key not in found:
-            found[key] = Label(name=name, name_key=key)
+            found[key] = Lbl(name=name, name_key=key)
             session.add(found[key])
 
     # Присвоенный `word.labels` уходит в ответ как есть, а `order_by` у связи
@@ -77,21 +83,25 @@ def resolve_labels(session: Session, names: list[str]) -> list[Label]:
     return sorted(found.values(), key=lambda label: label_sort_key(label.name_key))
 
 
-def find_by_key(session: Session, key: str, *, exclude_id: int | None = None) -> Label | None:
-    """Метка с тем же ключом названия.
+def find_by_key(
+    session: Session, key: str, *, exclude_id: int | None = None, deck: Deck = WORDS
+) -> Label | PhraseLabel | None:
+    """Метка колоды с тем же ключом названия.
 
     `exclude_id` — сама переименуемая метка: смена регистра не конфликт.
     """
-    stmt = select(Label).where(Label.name_key == key)
+    Lbl = deck.label
+    stmt = select(Lbl).where(Lbl.name_key == key)
     if exclude_id is not None:
-        stmt = stmt.where(Label.id != exclude_id)
+        stmt = stmt.where(Lbl.id != exclude_id)
     return session.scalar(stmt)
 
 
-def word_count(session: Session, label: Label) -> int:
-    """Число слов с меткой."""
+def word_count(session: Session, label: Label | PhraseLabel, deck: Deck = WORDS) -> int:
+    """Число записей колоды с меткой."""
+    links = deck.links
     return session.scalar(
-        select(func.count()).select_from(word_labels).where(word_labels.c.label_id == label.id)
+        select(func.count()).select_from(links).where(links.c.label_id == label.id)
     ) or 0
 
 

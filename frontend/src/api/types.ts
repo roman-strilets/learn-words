@@ -14,6 +14,13 @@ export type WordStatusValue = WordStatus | 'new'
 /** Что делаем на занятии: знакомимся с новыми словами или повторяем изученные. */
 export type StudyMode = 'learn' | 'review'
 
+/**
+ * Колода: слова или фразы. У фраз свои маршруты (`/phrases`, `/phrase-labels`,
+ * `/phrase-study`, `/phrase-stats`), но ответы — те же схемы, что у слов:
+ * `word` — текст фразы, `word_id` — id фразы, `word_count` у метки — число фраз.
+ */
+export type Deck = 'words' | 'phrases'
+
 /** Метка в составе слова. */
 export interface LabelRef {
   id: number

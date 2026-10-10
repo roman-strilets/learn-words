@@ -1,7 +1,9 @@
 import { NavLink, Route, Routes } from 'react-router'
 
+import { AddPhrasePage } from './pages/AddPhrasePage'
 import { AddWordPage } from './pages/AddWordPage'
 import { HomePage } from './pages/HomePage'
+import { PhrasesPage } from './pages/PhrasesPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { StatsPage } from './pages/StatsPage'
 import { StudyPage } from './pages/StudyPage'
@@ -11,6 +13,7 @@ const NAV = [
   { to: '/', label: 'Главная', end: true },
   { to: '/study', label: 'Занятие', end: false },
   { to: '/words', label: 'Словарь', end: false },
+  { to: '/phrases', label: 'Фразы', end: false },
   { to: '/stats', label: 'Статистика', end: false },
   { to: '/settings', label: 'Настройки', end: false },
 ]
@@ -44,6 +47,8 @@ export function App() {
           <Route path="/study" element={<StudyPage />} />
           <Route path="/words" element={<WordsPage />} />
           <Route path="/words/new" element={<AddWordPage />} />
+          <Route path="/phrases" element={<PhrasesPage />} />
+          <Route path="/phrases/new" element={<AddPhrasePage />} />
           <Route path="/stats" element={<StatsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route

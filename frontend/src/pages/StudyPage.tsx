@@ -2,11 +2,12 @@ import { useCallback, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router'
 
-import { api } from '../api/client'
-import type { StudyMode } from '../api/types'
+import { deckApi, queryKeys } from '../api/client'
+import type { Deck, StudyMode } from '../api/types'
 import { RoundsRunner } from '../components/RoundsRunner'
 import { StudySession } from '../components/StudySession'
-import { MODE_LABEL, StudyModeLinks, studyPath } from '../components/StudyModeLinks'
+import { StudyModeLinks, modeLabel, studyPath } from '../components/StudyModeLinks'
+import { DECK_TEXT } from '../lib/deck'
 import { plural } from '../lib/format'
 import { Button, ErrorBox, Spinner } from '../components/ui'
 
@@ -15,35 +16,65 @@ interface Summary {
   correct: number
 }
 
-const LOADING_LABEL: Record<StudyMode, string> = {
-  learn: 'Подбираем новые слова…',
-  review: 'Собираем слова к повторению…',
+const LOADING_LABEL: Record<Deck, Record<StudyMode, string>> = {
+  words: {
+    learn: 'Подбираем новые слова…',
+    review: 'Собираем слова к повторению…',
+  },
+  phrases: {
+    learn: 'Подбираем новые фразы…',
+    review: 'Собираем фразы к повторению…',
+  },
 }
 
-const EMPTY: Record<StudyMode, { title: string; text: string }> = {
-  learn: {
-    title: 'Новых слов нет',
-    text: 'Все слова из словаря уже в изучении — или на сегодня исчерпан дневной лимит новых. Можно повторить изученное или добавить свои слова.',
+const EMPTY: Record<Deck, Record<StudyMode, { title: string; text: string }>> = {
+  words: {
+    learn: {
+      title: 'Новых слов нет',
+      text: 'Все слова из словаря уже в изучении — или на сегодня исчерпан дневной лимит новых. Можно повторить изученное или добавить свои слова.',
+    },
+    review: {
+      title: 'На сегодня всё',
+      text: 'Слова к повторению появятся, когда подойдёт их срок. Пока можно взять в работу новые слова.',
+    },
   },
-  review: {
-    title: 'На сегодня всё',
-    text: 'Слова к повторению появятся, когда подойдёт их срок. Пока можно взять в работу новые слова.',
+  phrases: {
+    learn: {
+      title: 'Новых фраз нет',
+      text: 'Все фразы уже в изучении — или на сегодня исчерпан дневной лимит новых фраз. Можно повторить изученное или добавить свои фразы.',
+    },
+    review: {
+      title: 'На сегодня всё',
+      text: 'Фразы к повторению появятся, когда подойдёт их срок. Пока можно взять в работу новые фразы.',
+    },
   },
+}
+
+const ADD_LABEL: Record<Deck, string> = {
+  words: 'Добавить слово',
+  phrases: 'Добавить фразу',
 }
 
 function parseMode(value: string | null): StudyMode | null {
   return value === 'learn' || value === 'review' ? value : null
 }
 
+/** Без `deck` в адресе — слова: старые ссылки `/study?mode=…` ведут туда же. */
+function parseDeck(value: string | null): Deck {
+  return value === 'phrases' ? 'phrases' : 'words'
+}
+
 export function StudyPage() {
   const [params] = useSearchParams()
   const mode = parseMode(params.get('mode'))
+  const deck = parseDeck(params.get('deck'))
+  const keys = queryKeys(deck)
   const queryClient = useQueryClient()
   const [summary, setSummary] = useState<Summary | null>(null)
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
-    queryKey: ['session', mode],
-    queryFn: () => api.getSession(mode as StudyMode),
+    queryKey: ['session', deck, mode],
+    queryFn: () => deckApi(deck).getSession(mode as StudyMode),
     enabled: mode !== null,
     // Сессия — снимок на момент запроса; фоновые перезапросы сбили бы очередь
     staleTime: Infinity,
@@ -54,10 +85,10 @@ export function StudyPage() {
   const handleFinished = useCallback(
     (result: Summary) => {
       setSummary(result)
-      queryClient.invalidateQueries({ queryKey: ['overview'] })
-      queryClient.invalidateQueries({ queryKey: ['words'] })
+      queryClient.invalidateQueries({ queryKey: keys.overview })
+      queryClient.invalidateQueries({ queryKey: keys.list })
     },
-    [queryClient],
+    [queryClient, keys.overview, keys.list],
   )
 
   const startAnother = async () => {
@@ -70,12 +101,13 @@ export function StudyPage() {
     return (
       <div className="flex flex-col items-center gap-8">
         <h1 className="text-center text-4xl font-bold text-ink">Чем займёмся?</h1>
-        <StudyModeLinks />
+        <StudyModeLinks deck="words" />
+        <StudyModeLinks deck="phrases" />
       </div>
     )
   }
 
-  if (isLoading) return <Spinner label={LOADING_LABEL[mode]} />
+  if (isLoading) return <Spinner label={LOADING_LABEL[deck][mode]} />
   if (error) return <ErrorBox message={(error as Error).message} />
   if (!data) return null
 
@@ -113,17 +145,20 @@ export function StudyPage() {
     const other: StudyMode = mode === 'learn' ? 'review' : 'learn'
     return (
       <div className="flex flex-col items-center gap-6">
-        <h1 className="text-center text-4xl font-bold text-ink">{EMPTY[mode].title}</h1>
-        <p className="max-w-md text-center text-muted">{EMPTY[mode].text}</p>
+        <h1 className="text-center text-4xl font-bold text-ink">{EMPTY[deck][mode].title}</h1>
+        <p className="max-w-md text-center text-muted">{EMPTY[deck][mode].text}</p>
         <div className="flex flex-wrap justify-center gap-4">
-          <Link to={studyPath(other)} className="text-accent underline underline-offset-4">
-            {MODE_LABEL[other]}
+          <Link to={studyPath(other, deck)} className="text-accent underline underline-offset-4">
+            {modeLabel(other, deck)}
           </Link>
           <Link to="/" className="text-accent underline underline-offset-4">
             На главную
           </Link>
-          <Link to="/words/new" className="text-accent underline underline-offset-4">
-            Добавить слово
+          <Link
+            to={`${DECK_TEXT[deck].path}/new`}
+            className="text-accent underline underline-offset-4"
+          >
+            {ADD_LABEL[deck]}
           </Link>
         </div>
       </div>
@@ -133,10 +168,11 @@ export function StudyPage() {
   // Режимы расходятся только в начале: «Изучение» сперва ведёт знакомство
   // и лишь потом запрашивает раунды, «Повторение» получает их вместе
   // с занятием и идёт в раннер сразу.
-  // key: при смене режима очередь и счётчики должны собраться заново
+  // key: при смене режима или колоды очередь и счётчики должны собраться заново
   return mode === 'review' ? (
     <RoundsRunner
-      key={mode}
+      key={`${deck}:${mode}`}
+      deck={deck}
       rounds={data.rounds}
       sessionId={data.session_id}
       mode={mode}
@@ -144,7 +180,8 @@ export function StudyPage() {
     />
   ) : (
     <StudySession
-      key={mode}
+      key={`${deck}:${mode}`}
+      deck={deck}
       session={data}
       sessionId={data.session_id}
       onFinished={handleFinished}

@@ -8,6 +8,7 @@ import type {
   ClassifyBatch,
   ClassifyRequest,
   DailyStat,
+  Deck,
   ExerciseRound,
   Label,
   LabelUpdate,
@@ -56,108 +57,151 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T
 }
 
-export const api = {
-  getSession: (mode: StudyMode) =>
-    request<SessionPayload>(`/study/session?mode=${mode}`),
-
-  // План раундов изучения: зовётся один раз, когда знакомство пройдено и
-  // состав занятия окончателен — «Уже знаю» до этого момента меняет слова
-  buildRounds: (wordIds: number[]) =>
-    request<ExerciseRound[]>('/study/rounds', {
-      method: 'POST',
-      body: JSON.stringify({ word_ids: wordIds }),
-    }),
-
-  select: (wordId: number, action: 'learn' | 'know', excludeIds: number[] = []) =>
-    request<SelectResponse>('/study/select', {
-      method: 'POST',
-      body: JSON.stringify({ word_id: wordId, action, exclude_ids: excludeIds }),
-    }),
-
-  answer: (payload: AnswerPayload) =>
-    request<AnswerResponse>('/study/answer', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
-
-  // Конец занятия: сервер сам разбирает журнал занятия и один раз
-  // пересчитывает расписание каждого слова, прошедшего все раунды.
-  // Режим решает, как выводить итог, и из данных он не выводится
-  finishSession: (sessionId: string, mode: StudyMode) =>
-    request<SessionFinishResult[]>('/study/finish', {
-      method: 'POST',
-      body: JSON.stringify({ session_id: sessionId, mode }),
-    }),
-
-  listWords: (params: {
-    search?: string
-    status?: string
-    priority?: boolean
-    /** id метки или `none` — слова без меток */
-    label?: number | 'none'
-    /** Только записи с `id ≥ fromId` — курсор разметки */
-    fromId?: number | null
-    limit?: number
-    offset?: number
-  }) => {
-    const query = new URLSearchParams()
-    if (params.search) query.set('search', params.search)
-    if (params.status) query.set('status', params.status)
-    if (params.priority) query.set('priority', 'true')
-    if (params.label !== undefined) query.set('label', String(params.label))
-    if (params.fromId) query.set('from_id', String(params.fromId))
-    query.set('limit', String(params.limit ?? 50))
-    query.set('offset', String(params.offset ?? 0))
-    return request<WordPage>(`/words?${query.toString()}`)
+/** Префиксы маршрутов колоды: у фраз свои, чтобы забытый параметр не увёл в слова. */
+const PREFIX: Record<Deck, { items: string; labels: string; study: string; stats: string }> = {
+  words: { items: '/words', labels: '/labels', study: '/study', stats: '/stats' },
+  phrases: {
+    items: '/phrases',
+    labels: '/phrase-labels',
+    study: '/phrase-study',
+    stats: '/phrase-stats',
   },
+}
 
-  createWord: (payload: WordInput) =>
-    request<WordWithProgress>('/words', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
+/** Словарь, метки, занятие и статистика колоды — одни и те же методы с её префиксами. */
+export function deckApi(deck: Deck) {
+  const { items, labels, study, stats } = PREFIX[deck]
+  return {
+    getSession: (mode: StudyMode) =>
+      request<SessionPayload>(`${study}/session?mode=${mode}`),
 
-  updateWord: ({ id, ...payload }: WordInput & { id: number }) =>
-    request<WordWithProgress>(`/words/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    }),
+    // План раундов изучения: зовётся один раз, когда знакомство пройдено и
+    // состав занятия окончателен — «Уже знаю» до этого момента меняет слова
+    buildRounds: (wordIds: number[]) =>
+      request<ExerciseRound[]>(`${study}/rounds`, {
+        method: 'POST',
+        body: JSON.stringify({ word_ids: wordIds }),
+      }),
 
-  // «Новое» тоже статус: сервер на нём удаляет прогресс
-  setWordStatus: ({ id, status }: { id: number; status: WordStatusValue }) =>
-    request<WordWithProgress>(`/words/${id}/status`, {
-      method: 'PUT',
-      body: JSON.stringify({ status }),
-    }),
+    select: (wordId: number, action: 'learn' | 'know', excludeIds: number[] = []) =>
+      request<SelectResponse>(`${study}/select`, {
+        method: 'POST',
+        body: JSON.stringify({ word_id: wordId, action, exclude_ids: excludeIds }),
+      }),
 
-  // Поднять новое слово в очереди «Изучения»; слову в изучении сервер ответит 409
-  setWordPriority: ({ id, priority }: { id: number; priority: boolean }) =>
-    request<WordWithProgress>(`/words/${id}/priority`, {
-      method: 'PUT',
-      body: JSON.stringify({ priority }),
-    }),
+    answer: (payload: AnswerPayload) =>
+      request<AnswerResponse>(`${study}/answer`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
 
-  deleteWord: (wordId: number) =>
-    request<void>(`/words/${wordId}`, { method: 'DELETE' }),
+    // Конец занятия: сервер сам разбирает журнал занятия и один раз
+    // пересчитывает расписание каждого слова, прошедшего все раунды.
+    // Режим решает, как выводить итог, и из данных он не выводится
+    finishSession: (sessionId: string, mode: StudyMode) =>
+      request<SessionFinishResult[]>(`${study}/finish`, {
+        method: 'POST',
+        body: JSON.stringify({ session_id: sessionId, mode }),
+      }),
 
-  listLabels: () => request<Label[]>('/labels'),
+    listWords: (params: {
+      search?: string
+      status?: string
+      priority?: boolean
+      /** id метки или `none` — записи без меток */
+      label?: number | 'none'
+      /** Только записи с `id ≥ fromId` — курсор разметки (только слова) */
+      fromId?: number | null
+      limit?: number
+      offset?: number
+    }) => {
+      const query = new URLSearchParams()
+      if (params.search) query.set('search', params.search)
+      if (params.status) query.set('status', params.status)
+      if (params.priority) query.set('priority', 'true')
+      if (params.label !== undefined) query.set('label', String(params.label))
+      if (params.fromId) query.set('from_id', String(params.fromId))
+      query.set('limit', String(params.limit ?? 50))
+      query.set('offset', String(params.offset ?? 0))
+      return request<WordPage>(`${items}?${query.toString()}`)
+    },
 
-  createLabel: (payload: { name: string; description?: string | null }) =>
-    request<Label>('/labels', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
+    createWord: (payload: WordInput) =>
+      request<WordWithProgress>(items, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
 
-  // Частичная правка: переименование не стирает описание
-  updateLabel: ({ id, ...payload }: LabelUpdate & { id: number }) =>
-    request<Label>(`/labels/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    }),
+    updateWord: ({ id, ...payload }: WordInput & { id: number }) =>
+      request<WordWithProgress>(`${items}/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      }),
 
-  // Метка снимается со всех слов; слова и прогресс не меняются
-  deleteLabel: (labelId: number) =>
-    request<void>(`/labels/${labelId}`, { method: 'DELETE' }),
+    // «Новое» тоже статус: сервер на нём удаляет прогресс
+    setWordStatus: ({ id, status }: { id: number; status: WordStatusValue }) =>
+      request<WordWithProgress>(`${items}/${id}/status`, {
+        method: 'PUT',
+        body: JSON.stringify({ status }),
+      }),
+
+    // Поднять новую запись в очереди «Изучения»; записи в изучении сервер ответит 409
+    setWordPriority: ({ id, priority }: { id: number; priority: boolean }) =>
+      request<WordWithProgress>(`${items}/${id}/priority`, {
+        method: 'PUT',
+        body: JSON.stringify({ priority }),
+      }),
+
+    deleteWord: (wordId: number) =>
+      request<void>(`${items}/${wordId}`, { method: 'DELETE' }),
+
+    listLabels: () => request<Label[]>(labels),
+
+    createLabel: (payload: { name: string; description?: string | null }) =>
+      request<Label>(labels, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+
+    // Частичная правка: переименование не стирает описание
+    updateLabel: ({ id, ...payload }: LabelUpdate & { id: number }) =>
+      request<Label>(`${labels}/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      }),
+
+    // Метка снимается со всех записей колоды; записи и прогресс не меняются
+    deleteLabel: (labelId: number) =>
+      request<void>(`${labels}/${labelId}`, { method: 'DELETE' }),
+
+    overview: () => request<StatsOverview>(`${stats}/overview`),
+
+    daily: (days = 30) => request<DailyStat[]>(`${stats}/daily?days=${days}`),
+  }
+}
+
+/**
+ * Ключи запросов колоды. У слов — прежние ключи, чтобы существующие
+ * инвалидации работали; у фраз — свои, чтобы правка фраз не сбрасывала слова.
+ */
+export function queryKeys(deck: Deck) {
+  return deck === 'words'
+    ? {
+        list: ['words'] as const,
+        labels: ['labels'] as const,
+        overview: ['overview'] as const,
+        daily: (days: number) => ['daily', days] as const,
+      }
+    : {
+        list: ['phrases'] as const,
+        labels: ['phrase-labels'] as const,
+        overview: ['overview', 'phrases'] as const,
+        daily: (days: number) => ['daily', 'phrases', days] as const,
+      }
+}
+
+export const api = {
+  ...deckApi('words'),
 
   // Одна пачка автоматической разметки: модель думает над ней до двух минут.
   // 502/504 — классификатор недоступен или не ответил, `detail` называет причину
@@ -166,10 +210,6 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
-
-  overview: () => request<StatsOverview>('/stats/overview'),
-
-  daily: (days = 30) => request<DailyStat[]>(`/stats/daily?days=${days}`),
 
   getSettings: () => request<AppSettings>('/settings'),
 

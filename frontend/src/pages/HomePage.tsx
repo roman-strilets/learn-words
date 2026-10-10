@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 
-import { api } from '../api/client'
+import { deckApi, queryKeys } from '../api/client'
+import type { Deck, StatsOverview } from '../api/types'
 import { plural } from '../lib/format'
 import { StudyModeLinks } from '../components/StudyModeLinks'
 import { ErrorBox, Spinner } from '../components/ui'
@@ -14,26 +15,28 @@ function StatTile({ label, value }: { label: string; value: number }) {
   )
 }
 
-export function HomePage() {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ['overview'],
-    queryFn: api.overview,
-  })
+const BLOCK: Record<
+  Deck,
+  { title: string; fresh: [string, string, string]; due: [string, string, string] }
+> = {
+  words: {
+    title: 'Слова',
+    fresh: ['новое слово', 'новых слова', 'новых слов'],
+    due: ['слово готово', 'слова готовы', 'слов готово'],
+  },
+  phrases: {
+    title: 'Фразы',
+    fresh: ['новая фраза', 'новые фразы', 'новых фраз'],
+    due: ['фраза готова', 'фразы готовы', 'фраз готово'],
+  },
+}
 
-  if (isLoading) return <Spinner />
-  if (error) return <ErrorBox message={(error as Error).message} />
-  if (!data) return null
-
-  const ready = data.new + data.due_now
-
+/** Блок колоды: плитки, кнопки занятий с подсказками и числа за сегодня. */
+function DeckBlock({ deck, data }: { deck: Deck; data: StatsOverview }) {
+  const text = BLOCK[deck]
   return (
-    <div className="flex flex-col items-center gap-10">
-      <header className="flex flex-col items-center gap-3">
-        <h1 className="text-center text-5xl font-bold text-ink">Изучение слов</h1>
-        <p className="text-lg text-muted">
-          {ready > 0 ? 'Выберите, чем сегодня займёмся' : 'На сегодня всё повторено'}
-        </p>
-      </header>
+    <section className="flex w-full flex-col items-center gap-6">
+      <h2 className="text-2xl font-bold text-ink">{text.title}</h2>
 
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <StatTile label="В словаре" value={data.total_words} />
@@ -43,9 +46,10 @@ export function HomePage() {
       </div>
 
       <StudyModeLinks
+        deck={deck}
         hints={{
-          learn: `${data.new} ${plural(data.new, ['новое слово', 'новых слова', 'новых слов'])}`,
-          review: `${data.due_now} ${plural(data.due_now, ['слово готово', 'слова готовы', 'слов готово'])}`,
+          learn: `${data.new} ${plural(data.new, text.fresh)}`,
+          review: `${data.due_now} ${plural(data.due_now, text.due)}`,
         }}
       />
 
@@ -63,6 +67,36 @@ export function HomePage() {
           <dd className="font-semibold text-ink">{data.streak_days}</dd>
         </div>
       </dl>
+    </section>
+  )
+}
+
+function useOverview(deck: Deck) {
+  return useQuery({ queryKey: queryKeys(deck).overview, queryFn: deckApi(deck).overview })
+}
+
+export function HomePage() {
+  const words = useOverview('words')
+  const phrases = useOverview('phrases')
+
+  if (words.isLoading || phrases.isLoading) return <Spinner />
+  const error = words.error ?? phrases.error
+  if (error) return <ErrorBox message={(error as Error).message} />
+  if (!words.data || !phrases.data) return null
+
+  const ready = words.data.new + words.data.due_now + phrases.data.new + phrases.data.due_now
+
+  return (
+    <div className="flex flex-col items-center gap-12">
+      <header className="flex flex-col items-center gap-3">
+        <h1 className="text-center text-5xl font-bold text-ink">Изучение слов</h1>
+        <p className="text-lg text-muted">
+          {ready > 0 ? 'Выберите, чем сегодня займёмся' : 'На сегодня всё повторено'}
+        </p>
+      </header>
+
+      <DeckBlock deck="words" data={words.data} />
+      <DeckBlock deck="phrases" data={phrases.data} />
     </div>
   )
 }

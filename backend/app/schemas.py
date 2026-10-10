@@ -130,6 +130,21 @@ class WordUpdate(BaseModel):
     labels: list[LabelName] | None = None
 
 
+# Фраза длиннее слова: «once in a blue moon», «It's up to you» и целые
+# предложения. 200 — с запасом под реплику, но без абзацев
+PHRASE_MAX_LENGTH = 200
+
+
+class PhraseCreate(WordCreate):
+    """Новая фраза: те же поля, что у слова, `word` — текст фразы."""
+
+    word: str = Field(min_length=1, max_length=PHRASE_MAX_LENGTH)
+
+
+class PhraseUpdate(WordUpdate):
+    word: str | None = Field(default=None, min_length=1, max_length=PHRASE_MAX_LENGTH)
+
+
 class WordStatusUpdate(BaseModel):
     """Статус, выставленный вручную из словаря.
 

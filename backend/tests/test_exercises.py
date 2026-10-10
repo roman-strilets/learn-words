@@ -6,6 +6,8 @@ from collections import Counter
 import pytest
 from sqlalchemy.orm import Session
 
+from app.clock import utcnow
+from app.decks import PHRASES
 from app.exercises import (
     build_exercise,
     build_letter_bank,
@@ -18,7 +20,7 @@ from app.exercises import (
     translation_variants,
     word_key_for,
 )
-from app.models import ExerciseType, Word
+from app.models import ExerciseType, Phrase, Word
 
 
 @pytest.mark.parametrize(
@@ -340,3 +342,96 @@ def test_repeat_card_reshuffles_the_letter_bank(db_session: Session, words: list
     assert (second.mask, second.solution) == (first.mask, first.solution)
     assert sorted(second.letters) == sorted(first.letters)
     assert second.letters != first.letters
+
+
+# ------------------------------------------------------------------------ фразы
+
+
+def _phrase(db_session: Session, text: str, translation: str) -> Phrase:
+    phrase = Phrase(
+        text=text, text_key=word_key_for(text), translation=translation, created_at=utcnow()
+    )
+    db_session.add(phrase)
+    db_session.flush()
+    return phrase
+
+
+@pytest.mark.parametrize("raw", ["It's up to you.", "Its up to you", "IT’S  up-to you!"])
+def test_phrase_normalization_drops_the_apostrophe(raw: str):
+    assert normalize_answer(raw, drop_apostrophes=True) == "its up to you"
+
+
+def test_word_normalization_keeps_the_apostrophe():
+    assert normalize_answer("o'clock") == "o'clock"
+    assert normalize_answer("o’clock") == "o'clock"
+
+
+@pytest.mark.parametrize(
+    "exercise_type", [ExerciseType.WRITING_RU_EN, ExerciseType.DICTATION, ExerciseType.LETTERS]
+)
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ("It's up to you.", True),
+        ("its up to you", True),
+        ("IT’S  up-to you!", True),
+        ("it is up to you", False),
+        ("up to you it's", False),
+        ("It's up to", False),
+    ],
+)
+def test_phrase_answer_ignores_the_apostrophe_only(
+    db_session: Session, exercise_type: ExerciseType, answer: str, expected: bool
+):
+    phrase = _phrase(db_session, "It's up to you.", "Решать тебе.")
+
+    assert check_answer(phrase, exercise_type, answer, PHRASES) is expected
+
+
+def test_phrase_letters_keep_spaces_and_punctuation(db_session: Session):
+    phrase = _phrase(db_session, "It's up to you!", "Решать тебе!")
+
+    assert build_mask(phrase.word) == "__'_ __ __ ___!"
+    exercise = build_exercise(db_session, phrase, ExerciseType.LETTERS, deck=PHRASES)
+    assert exercise.solution == "It's up to you!"
+    assert len(exercise.letters) == 10
+
+
+PHRASEBOOK = [
+    ("break the ice", "растопить лёд"),
+    ("hit the sack", "лечь спать"),
+    ("piece of cake", "проще простого"),
+    ("once in a blue moon", "очень редко"),
+    ("look after", "присматривать"),
+    ("call it a day", "закончить на сегодня"),
+]
+
+
+@pytest.mark.parametrize("size", [1, 2, 3, 6])
+def test_phrase_distractors_come_from_phrases_only(
+    db_session: Session, words: list[Word], size: int
+):
+    phrases = [_phrase(db_session, t, tr) for t, tr in PHRASEBOOK[:size]]
+    target = phrases[0]
+    texts = {p.word for p in phrases}
+    translations = {p.translation for p in phrases}
+
+    for seed in range(20):
+        rng = random.Random(seed)
+        ru_en = build_exercise(
+            db_session, target, ExerciseType.CHOICE_RU_EN, rng=rng, deck=PHRASES
+        )
+        en_ru = build_exercise(
+            db_session, target, ExerciseType.CHOICE_EN_RU, rng=rng, deck=PHRASES
+        )
+
+        expected = min(4, size)
+        assert len(ru_en.options) == expected
+        assert target.word in ru_en.options
+        assert set(ru_en.options) <= texts
+        assert len(set(ru_en.options)) == expected
+
+        assert len(en_ru.options) == expected
+        assert target.translation in en_ru.options
+        assert set(en_ru.options) <= translations
+        assert len(set(en_ru.options)) == expected

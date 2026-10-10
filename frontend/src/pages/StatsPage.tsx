@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 
-import { api } from '../api/client'
-import type { DailyStat } from '../api/types'
+import { deckApi, queryKeys } from '../api/client'
+import type { DailyStat, Deck } from '../api/types'
 import { ErrorBox, Spinner } from '../components/ui'
 
 const DAYS = 30
@@ -60,9 +60,17 @@ function DailyChart({ data }: { data: DailyStat[] }) {
   )
 }
 
-export function StatsPage() {
-  const overview = useQuery({ queryKey: ['overview'], queryFn: api.overview })
-  const daily = useQuery({ queryKey: ['daily', DAYS], queryFn: () => api.daily(DAYS) })
+const DECK_TITLE: Record<Deck, { title: string; total: string }> = {
+  words: { title: 'Слова', total: 'Слов в словаре' },
+  phrases: { title: 'Фразы', total: 'Фраз в словаре' },
+}
+
+/** Статистика одной колоды: числа слов и фраз не суммируются — у них свои журналы. */
+function DeckStats({ deck }: { deck: Deck }) {
+  const client = deckApi(deck)
+  const keys = queryKeys(deck)
+  const overview = useQuery({ queryKey: keys.overview, queryFn: client.overview })
+  const daily = useQuery({ queryKey: keys.daily(DAYS), queryFn: () => client.daily(DAYS) })
 
   if (overview.isLoading || daily.isLoading) return <Spinner />
   const error = overview.error ?? daily.error
@@ -74,7 +82,7 @@ export function StatsPage() {
   const accuracy = totalAnswers ? Math.round((totalCorrect / totalAnswers) * 100) : 0
 
   const rows: Array<[string, number | string]> = [
-    ['Слов в словаре', overview.data.total_words],
+    [DECK_TITLE[deck].total, overview.data.total_words],
     ['Ещё не начато', overview.data.new],
     ['Изучается', overview.data.learning],
     ['На повторении', overview.data.review],
@@ -86,16 +94,16 @@ export function StatsPage() {
   ]
 
   return (
-    <div className="flex w-full max-w-3xl flex-col gap-8">
-      <h1 className="text-4xl font-bold text-ink">Статистика</h1>
+    <section className="flex flex-col gap-6">
+      <h2 className="text-2xl font-bold text-ink">{DECK_TITLE[deck].title}</h2>
 
-      <section className="flex flex-col gap-3">
-        <h2 className="text-lg font-semibold text-ink-soft">Ответы за {DAYS} дней</h2>
+      <div className="flex flex-col gap-3">
+        <h3 className="text-lg font-semibold text-ink-soft">Ответы за {DAYS} дней</h3>
         <DailyChart data={daily.data} />
-      </section>
+      </div>
 
-      <section className="flex flex-col gap-3">
-        <h2 className="text-lg font-semibold text-ink-soft">Сводка</h2>
+      <div className="flex flex-col gap-3">
+        <h3 className="text-lg font-semibold text-ink-soft">Сводка</h3>
         <dl className="grid gap-x-8 gap-y-2 sm:grid-cols-2">
           {rows.map(([label, value]) => (
             <div
@@ -107,7 +115,17 @@ export function StatsPage() {
             </div>
           ))}
         </dl>
-      </section>
+      </div>
+    </section>
+  )
+}
+
+export function StatsPage() {
+  return (
+    <div className="flex w-full max-w-3xl flex-col gap-10">
+      <h1 className="text-4xl font-bold text-ink">Статистика</h1>
+      <DeckStats deck="words" />
+      <DeckStats deck="phrases" />
     </div>
   )
 }

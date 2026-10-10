@@ -179,6 +179,7 @@ function VoiceSection() {
 const TABS = [
   { value: 'general', label: 'Общие' },
   { value: 'labels', label: 'Метки' },
+  { value: 'phrase-labels', label: 'Метки фраз' },
   { value: 'classifier', label: 'Разметка' },
 ] as const
 
@@ -214,7 +215,9 @@ export function SettingsPage() {
       </div>
 
       {tab === 'labels' ? (
-        <LabelsSection />
+        <LabelsSection deck="words" />
+      ) : tab === 'phrase-labels' ? (
+        <LabelsSection deck="phrases" />
       ) : tab === 'classifier' ? (
         <ClassifierSection />
       ) : (

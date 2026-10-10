@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 
-import { ApiError, api } from '../api/client'
+import { ApiError, deckApi } from '../api/client'
 import type {
   AnswerResponse,
+  Deck,
   Exercise,
   ExerciseRound,
   ExerciseType,
@@ -26,6 +27,8 @@ const EXERCISE_LABEL: Record<ExerciseType, string> = {
 }
 
 interface Props {
+  /** Колода занятия: от неё зависят только маршруты API */
+  deck?: Deck
   rounds: ExerciseRound[]
   sessionId: string
   mode: StudyMode
@@ -51,7 +54,8 @@ function isGone(error: unknown): boolean {
  * выбывшее слово может сделать два разных серверных порядка одинаковыми
  * (`[a, b, c]` и `[a, c, b]` без `c`).
  */
-export function RoundsRunner({ rounds, sessionId, mode, onFinished }: Props) {
+export function RoundsRunner({ deck = 'words', rounds, sessionId, mode, onFinished }: Props) {
+  const client = deckApi(deck)
   const [roundIndex, setRoundIndex] = useState(0)
   const [queue, setQueue] = useState<Exercise[]>(() => rounds[0]?.exercises ?? [])
   // Порядок первых показов текущего раунда — так, как он показан.
@@ -89,12 +93,12 @@ export function RoundsRunner({ rounds, sessionId, mode, onFinished }: Props) {
   // Итог занятия показываем только после ответа сервера: если пересчёт не
   // прошёл, вся работа занятия пропала бы молча — лучше дать повторить.
   const finishMutation = useMutation({
-    mutationFn: (id: string) => api.finishSession(id, mode),
+    mutationFn: (id: string) => client.finishSession(id, mode),
     onSuccess: () => onFinished(tally),
   })
 
   const answerMutation = useMutation({
-    mutationFn: api.answer,
+    mutationFn: client.answer,
     onSuccess: (data) => {
       setTally((value) => ({
         answered: value.answered + 1,

@@ -15,7 +15,7 @@ from sqlalchemy import (
     false,
     func,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, synonym
 
 from app.clock import utcnow
 from app.db import Base
@@ -179,6 +179,152 @@ class ReviewLog(Base):
     # и выводит итог. NULL — ответ вне занятия-повторения (режим «Изучение»
     # и все строки, накопленные до появления раундов).
     session_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+
+
+# --------------------------------------------------------------------- фразы
+#
+# Фразы — вторая колода со своим словарём, метками, прогрессом и журналом.
+# Таблицы отдельные, а не колонка «вид записи» у `words`: запрос по словам
+# не может вернуть фразу, `finish` по `review_log` не может пересчитать фразу,
+# и счётчики статистики слов не зависят от фраз (research R1).
+#
+# Общий код занятия работает с обеими колодами через описание колоды
+# (`app/decks.py`). Чтобы он и общие схемы читали фразу теми же именами, что
+# слово, у моделей фраз есть синонимы: `word → text`, `word_key → text_key`,
+# `word_id → phrase_id` (research R2). Имена колонок в базе остаются честными.
+
+
+# Связка «фраза — метка фраз»; каскады и индекс — как у `word_labels`
+phrase_label_links = Table(
+    "phrase_label_links",
+    Base.metadata,
+    Column("phrase_id", ForeignKey("phrases.id", ondelete="CASCADE"), primary_key=True),
+    Column(
+        "label_id", ForeignKey("phrase_labels.id", ondelete="CASCADE"), primary_key=True
+    ),
+    Index("ix_phrase_label_links_label_id", "label_id"),
+)
+
+
+class PhraseLabel(Base):
+    """Метка фраз. Те же поля, что у `Label`, но своя таблица: метка фраз и
+    метка слов с одинаковым названием — разные метки."""
+
+    __tablename__ = "phrase_labels"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(50), nullable=False)
+    name_key: Mapped[str] = mapped_column(String(50), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    __table_args__ = (Index("ux_phrase_labels_name_key", "name_key", unique=True),)
+
+    def __repr__(self) -> str:
+        return f"<PhraseLabel {self.id} {self.name!r}>"
+
+
+class Phrase(Base):
+    """Фраза — английское выражение из нескольких слов с переводом."""
+
+    __tablename__ = "phrases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    text: Mapped[str] = mapped_column(String(200), nullable=False)
+    # lower + схлопнутые пробелы — ключ дубля, как `Word.word_key`
+    text_key: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    translation: Mapped[str] = mapped_column(Text, nullable=False)
+    example: Mapped[str | None] = mapped_column(Text, nullable=True)
+    example_translation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    # «Учить первой»: бывает только у фразы без прогресса
+    priority: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+
+    # Имена слова для общего кода занятия и схем `WordOut`
+    word = synonym("text")
+    word_key = synonym("text_key")
+
+    progress: Mapped["PhraseProgress | None"] = relationship(
+        back_populates="phrase",
+        cascade="all, delete-orphan",
+        uselist=False,
+        lazy="selectin",
+    )
+    labels: Mapped[list[PhraseLabel]] = relationship(
+        secondary=phrase_label_links,
+        lazy="selectin",
+        order_by=func.replace(PhraseLabel.name_key, "ё", "е"),
+    )
+
+    __table_args__ = (
+        Index("ux_phrases_text_key_translation", "text_key", "translation", unique=True),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Phrase {self.id} {self.text!r}>"
+
+
+class PhraseProgress(Base):
+    """Прогресс по фразе — те же колонки и смысл, что у `Progress`."""
+
+    __tablename__ = "phrase_progress"
+
+    phrase_id: Mapped[int] = mapped_column(
+        ForeignKey("phrases.id", ondelete="CASCADE"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default=WordStatus.LEARNING)
+    step: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    repetitions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ease: Mapped[float] = mapped_column(Float, nullable=False, default=2.5)
+    interval_days: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    due_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    lapses: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    word_id = synonym("phrase_id")
+
+    phrase: Mapped[Phrase] = relationship(back_populates="progress")
+
+    __table_args__ = (Index("ix_phrase_progress_status_due_at", "status", "due_at"),)
+
+    def __repr__(self) -> str:
+        return (
+            f"<PhraseProgress phrase={self.phrase_id} {self.status} "
+            f"step={self.step} due={self.due_at}>"
+        )
+
+
+class PhraseReviewLog(Base):
+    """Журнал ответов по фразам — те же колонки, что у `ReviewLog`."""
+
+    __tablename__ = "phrase_review_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    phrase_id: Mapped[int] = mapped_column(
+        ForeignKey("phrases.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    exercise: Mapped[str] = mapped_column(String(24), nullable=False)
+    correct: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    used_hint: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    quality: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status_before: Mapped[str] = mapped_column(String(16), nullable=False)
+    status_after: Mapped[str] = mapped_column(String(16), nullable=False)
+    ease_after: Mapped[float] = mapped_column(Float, nullable=False)
+    interval_after: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, index=True
+    )
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+
+    word_id = synonym("phrase_id")
 
 
 class Setting(Base):

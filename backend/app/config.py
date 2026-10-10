@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     new_words_per_session: int = 5
     review_words_per_session: int = 5
     daily_new_limit: int = 20
+    # Фразы — своя колода со своими лимитами: занятие с фразами не съедает
+    # дневной лимит новых слов, и наоборот
+    new_phrases_per_session: int = 5
+    review_phrases_per_session: int = 5
+    daily_new_phrases_limit: int = 20
 
     # Границы SM-2
     max_interval_days: float = 365.0

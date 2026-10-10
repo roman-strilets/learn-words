@@ -33,6 +33,22 @@ function assemble(mask: string, slots: Slot[]): string {
     .join('')
 }
 
+/** Позиции маски, разбитые на слова по пробелам: «__ ___» → [[0, 1], [3, 4, 5]]. */
+function maskWords(mask: string): number[][] {
+  const words: number[][] = []
+  let current: number[] = []
+  for (let index = 0; index < mask.length; index += 1) {
+    if (mask[index] === ' ') {
+      if (current.length) words.push(current)
+      current = []
+    } else {
+      current.push(index)
+    }
+  }
+  if (current.length) words.push(current)
+  return words
+}
+
 export function LettersCard({
   exercise,
   onAnswer,
@@ -168,26 +184,32 @@ export function LettersCard({
         {exercise.prompt}
       </Prompt>
 
-      <div className="flex w-full flex-wrap items-center justify-center gap-2 rounded bg-panel px-6 py-12">
-        {exercise.mask.split('').map((char, index) =>
-          char === '_' ? (
-            <button
-              key={index}
-              type="button"
-              disabled={locked}
-              onClick={() => clearFrom(positions.indexOf(index))}
-              className={`flex size-14 items-center justify-center bg-white text-2xl font-semibold text-ink ${
-                index === activeMaskIndex ? 'ring-2 ring-accent' : ''
-              }`}
-            >
-              {slots.find((slot) => slot.maskIndex === index)?.char ?? ''}
-            </button>
-          ) : (
-            <span key={index} className="w-6 text-center text-2xl text-muted">
-              {char === ' ' ? '' : char}
-            </span>
-          ),
-        )}
+      {/* Ячейки сгруппированы по словам: фраза переносится между словами,
+          а не посреди слова */}
+      <div className="flex w-full flex-wrap items-center justify-center gap-x-8 gap-y-4 rounded bg-panel px-6 py-12">
+        {maskWords(exercise.mask).map((word) => (
+          <span key={word[0]} className="flex items-center gap-2">
+            {word.map((index) =>
+              exercise.mask[index] === '_' ? (
+                <button
+                  key={index}
+                  type="button"
+                  disabled={locked}
+                  onClick={() => clearFrom(positions.indexOf(index))}
+                  className={`flex size-14 items-center justify-center bg-white text-2xl font-semibold text-ink ${
+                    index === activeMaskIndex ? 'ring-2 ring-accent' : ''
+                  }`}
+                >
+                  {slots.find((slot) => slot.maskIndex === index)?.char ?? ''}
+                </button>
+              ) : (
+                <span key={index} className="w-6 text-center text-2xl text-muted">
+                  {exercise.mask[index]}
+                </span>
+              ),
+            )}
+          </span>
+        ))}
       </div>
 
       {bankVisible ? (

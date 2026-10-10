@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 
-import type { Word, WordInput } from '../api/types'
+import type { Deck, Word, WordInput } from '../api/types'
+import { DECK_TEXT } from '../lib/deck'
 import { LabelPicker } from './LabelPicker'
 import { ErrorBox, TextField } from './ui'
 
@@ -33,14 +34,15 @@ function valuesOf(word: Word | undefined): Values {
 }
 
 /**
- * Форма слова: одна и та же и на странице добавления, и в строке словаря
- * при правке. `columns` задаёт раскладку — в таблице поля идут парами,
+ * Форма слова или фразы: одна и та же и на странице добавления, и в строке
+ * словаря при правке. `columns` задаёт раскладку — в таблице поля идут парами,
  * на отдельной странице в столбик.
  *
  * Значения держит форма, поэтому очистка после удачного добавления делается
  * сменой `key` у самой формы: так не нужен обратный канал из родителя.
  */
 export function WordForm({
+  deck = 'words',
   word,
   submitLabel,
   pending,
@@ -50,7 +52,9 @@ export function WordForm({
   columns = 1,
   footer,
 }: {
-  /** Слово для правки; без него форма заводит новое */
+  /** Колода: подписи, длина текста и подсказки меток */
+  deck?: Deck
+  /** Запись для правки; без неё форма заводит новую */
   word?: Word
   submitLabel: string
   pending?: boolean
@@ -86,11 +90,12 @@ export function WordForm({
       className={columns === 2 ? 'grid gap-4 sm:grid-cols-2' : 'flex flex-col gap-5'}
     >
       <TextField
-        label="Слово на английском"
+        label={DECK_TEXT[deck].field}
         value={form.word}
         onChange={update('word')}
         required
         autoFocus
+        maxLength={DECK_TEXT[deck].maxLength}
         className="text-lg"
       />
       <TextField
@@ -112,6 +117,7 @@ export function WordForm({
       />
       <div className={wide}>
         <LabelPicker
+          deck={deck}
           value={form.labels}
           onChange={(labels) => setForm((current) => ({ ...current, labels }))}
         />

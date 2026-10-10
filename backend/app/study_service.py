@@ -1,4 +1,8 @@
-"""Учебная сессия: связывает чистый SRS, генератор упражнений и базу."""
+"""Учебная сессия: связывает чистый SRS, генератор упражнений и базу.
+
+Алгоритм один для обеих колод: каждая функция получает `deck` (по умолчанию —
+слова) и берёт из него свои таблицы и параметры занятия (`app/decks.py`).
+"""
 
 from __future__ import annotations
 
@@ -12,9 +16,9 @@ from typing import Literal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.decks import WORDS, Deck
 from app.exercises import build_exercise, check_answer, correct_answer_for, order_round
-from app.models import ExerciseType, Progress, ReviewLog, Setting, Word, WordStatus
+from app.models import ExerciseType, Phrase, Progress, Setting, Word, WordStatus
 from app.schemas import (
     AnswerRequest,
     AnswerResponse,
@@ -89,6 +93,7 @@ def new_words_query(
     limit: int,
     exclude_ids: Sequence[int] = (),
     order: NewWordsOrder = NewWordsOrder.OLDEST_FIRST,
+    deck: Deck = WORDS,
 ):
     """Слова, которых ещё нет в изучении: сначала поднятые, затем остальные,
     внутри каждой группы — в выбранном порядке добавления.
@@ -97,15 +102,16 @@ def new_words_query(
     файла один и тот же момент, а `id` растёт в порядке вставки, то есть
     в порядке строк файла.
     """
-    by_id = Word.id.desc() if order is NewWordsOrder.NEWEST_FIRST else Word.id.asc()
+    Item, Prog = deck.item, deck.progress
+    by_id = Item.id.desc() if order is NewWordsOrder.NEWEST_FIRST else Item.id.asc()
     stmt = (
-        select(Word)
-        .outerjoin(Progress, Progress.word_id == Word.id)
-        .where(Progress.word_id.is_(None))
-        .order_by(Word.priority.desc(), by_id)
+        select(Item)
+        .outerjoin(Prog, Prog.word_id == Item.id)
+        .where(Prog.word_id.is_(None))
+        .order_by(Item.priority.desc(), by_id)
     )
     if exclude_ids:
-        stmt = stmt.where(Word.id.notin_(exclude_ids))
+        stmt = stmt.where(Item.id.notin_(exclude_ids))
     return stmt.limit(limit)
 
 
@@ -134,44 +140,57 @@ def set_new_words_order(session: Session, order: NewWordsOrder) -> None:
     session.flush()
 
 
-def _started_today(session: Session, now: datetime) -> int:
+def _started_today(session: Session, now: datetime, deck: Deck = WORDS) -> int:
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    stmt = select(func.count(Progress.word_id)).where(
-        Progress.started_at >= day_start,
-        Progress.status.in_(ACTIVE_STATUSES),
+    Prog = deck.progress
+    stmt = select(func.count(Prog.word_id)).where(
+        Prog.started_at >= day_start,
+        Prog.status.in_(ACTIVE_STATUSES),
     )
     return session.scalar(stmt) or 0
 
 
-def new_words_allowance(session: Session, now: datetime, requested: int) -> int:
-    """Сколько новых слов можно предложить с учётом дневного лимита."""
-    remaining = settings.daily_new_limit - _started_today(session, now)
+def new_words_allowance(
+    session: Session, now: datetime, requested: int, deck: Deck = WORDS
+) -> int:
+    """Сколько новых записей можно предложить с учётом дневного лимита колоды."""
+    remaining = deck.daily_new_limit - _started_today(session, now, deck)
     return max(0, min(requested, remaining))
 
 
 def fetch_new_words(
-    session: Session, now: datetime, limit: int, exclude_ids: Sequence[int] = ()
-) -> list[Word]:
-    allowance = new_words_allowance(session, now, limit)
+    session: Session,
+    now: datetime,
+    limit: int,
+    exclude_ids: Sequence[int] = (),
+    deck: Deck = WORDS,
+) -> list[Word | Phrase]:
+    allowance = new_words_allowance(session, now, limit, deck)
     if allowance == 0:
         return []
     # Настройку читаем при каждом отборе, а не держим в памяти: сервер stateless,
-    # и смена порядка действует с ближайшего отбора — занятия и замены
-    order = get_new_words_order(session)
-    return list(session.scalars(new_words_query(allowance, exclude_ids, order)))
+    # и смена порядка действует с ближайшего отбора — занятия и замены.
+    # Фразы её не читают: у них всегда порядок добавления (research R7)
+    order = (
+        get_new_words_order(session) if deck.uses_order_setting else NewWordsOrder.OLDEST_FIRST
+    )
+    return list(session.scalars(new_words_query(allowance, exclude_ids, order, deck)))
 
 
-def _due_words(session: Session, now: datetime, limit: int) -> list[Word]:
+def _due_words(
+    session: Session, now: datetime, limit: int, deck: Deck = WORDS
+) -> list[Word | Phrase]:
     """Слова в обороте, у которых подошёл срок: самые просроченные первыми.
 
     Learning и review берутся одним запросом — на повторении важен срок,
     а не то, на каком этапе слово находится.
     """
+    Item, Prog = deck.item, deck.progress
     stmt = (
-        select(Word)
-        .join(Progress, Progress.word_id == Word.id)
-        .where(Progress.status.in_(ACTIVE_STATUSES), Progress.due_at <= now)
-        .order_by(Progress.due_at)
+        select(Item)
+        .join(Prog, Prog.word_id == Item.id)
+        .where(Prog.status.in_(ACTIVE_STATUSES), Prog.due_at <= now)
+        .order_by(Prog.due_at)
         .limit(limit)
     )
     return list(session.scalars(stmt))
@@ -185,6 +204,7 @@ def build_session(
     now: datetime,
     mode: SessionMode,
     rng: random.Random | None = None,
+    deck: Deck = WORDS,
 ) -> SessionOut:
     """Собрать стартовый набор занятия — 5 слов выбранной категории.
 
@@ -195,19 +215,19 @@ def build_session(
     """
     rng = rng or random.Random()
 
-    new_words: list[Word] = []
-    due: list[Word] = []
+    new_words: list[Word | Phrase] = []
+    due: list[Word | Phrase] = []
     rounds: list[ExerciseRound] = []
     session_id: str | None = None
 
     if mode is SessionMode.LEARN:
-        new_words = fetch_new_words(session, now, settings.new_words_per_session)
+        new_words = fetch_new_words(session, now, deck.new_per_session, deck=deck)
         # План раундов изучения приходит отдельным запросом: его состав
         # известен только после знакомства, где «Уже знаю» меняет слова
         words = new_words
     else:
-        due = _due_words(session, now, settings.review_words_per_session)
-        rounds = _rounds_for(session, due, rng)
+        due = _due_words(session, now, deck.review_per_session, deck)
+        rounds = _rounds_for(session, due, rng, deck)
         words = due
 
     if words:
@@ -217,10 +237,9 @@ def build_session(
 
     learning = sum(1 for w in due if w.progress.status == WordStatus.LEARNING.value)
 
+    Prog = deck.progress
     in_study = (
-        session.scalar(
-            select(func.count(Progress.word_id)).where(Progress.status.in_(ACTIVE_STATUSES))
-        )
+        session.scalar(select(func.count(Prog.word_id)).where(Prog.status.in_(ACTIVE_STATUSES)))
         or 0
     )
 
@@ -239,7 +258,10 @@ def build_session(
 
 
 def _rounds_for(
-    session: Session, words: Sequence[Word], rng: random.Random
+    session: Session,
+    words: Sequence[Word | Phrase],
+    rng: random.Random,
+    deck: Deck = WORDS,
 ) -> list[ExerciseRound]:
     """Раунды по типам упражнений: в каждом — по карточке на каждое слово.
 
@@ -251,7 +273,7 @@ def _rounds_for(
     if not words:
         return []
     rounds: list[ExerciseRound] = []
-    previous: list[Word] | None = None
+    previous: list[Word | Phrase] | None = None
     for exercise_type in EXERCISE_ROUNDS:
         last = previous[-1] if previous else None
         ordered = order_round(words, previous, last, rng, key=lambda w: w.id)
@@ -267,6 +289,7 @@ def _rounds_for(
                         # обещает выбор мышью, а кто хочет сложнее — жмёт «Скрыть буквы»
                         show_letters=True,
                         rng=rng,
+                        deck=deck,
                     )
                     for word in ordered
                 ],
@@ -280,6 +303,7 @@ def build_rounds(
     session: Session,
     word_ids: Sequence[int],
     rng: random.Random | None = None,
+    deck: Deck = WORDS,
 ) -> list[ExerciseRound]:
     """План раундов по готовому списку слов — по тем, что взяты в изучение.
 
@@ -290,9 +314,9 @@ def build_rounds(
     """
     rng = rng or random.Random()
 
-    words: list[Word] = []
+    words: list[Word | Phrase] = []
     for word_id in word_ids:
-        word = session.get(Word, word_id)
+        word = session.get(deck.item, word_id)
         # Слово могли удалить или вывести из оборота между знакомством
         # и запросом: занятие идёт дальше на остальных словах
         if word is None or word.progress is None:
@@ -301,7 +325,7 @@ def build_rounds(
             continue
         words.append(word)
 
-    return _rounds_for(session, words, rng)
+    return _rounds_for(session, words, rng, deck)
 
 
 def _log(
@@ -319,9 +343,10 @@ def _log(
     after: SrsState,
     now: datetime,
     session_id: str | None = None,
+    deck: Deck = WORDS,
 ) -> None:
     session.add(
-        ReviewLog(
+        deck.log(
             word_id=word_id,
             exercise=exercise.value,
             correct=correct,
@@ -342,10 +367,11 @@ def _log(
 
 def select_word(
     session: Session,
-    word: Word,
+    word: Word | Phrase,
     action: str,
     now: datetime,
     exclude_ids: Sequence[int] = (),
+    deck: Deck = WORDS,
 ) -> SelectResponse:
     """Обработать экран знакомства: «Уже знаю» или «Изучить»."""
     progress = word.progress
@@ -354,7 +380,7 @@ def select_word(
         # Заполняем состояние явно, не полагаясь на defaults колонок: они
         # применяются только при INSERT, а состояние нужно уже сейчас.
         before = start_learning(now)
-        progress = Progress(word_id=word.id, started_at=now, updated_at=now)
+        progress = deck.progress(word_id=word.id, started_at=now, updated_at=now)
         write_state(progress, before, now)
         session.add(progress)
         word.progress = progress
@@ -384,6 +410,7 @@ def select_word(
         before=before,
         after=state,
         now=now,
+        deck=deck,
     )
     session.flush()
 
@@ -392,7 +419,7 @@ def select_word(
     # Запрос идёт после flush: помеченное слово уже отсеется по своему прогрессу.
     replacement = None
     if action == "know":
-        replacement = next(iter(fetch_new_words(session, now, 1, exclude_ids)), None)
+        replacement = next(iter(fetch_new_words(session, now, 1, exclude_ids, deck)), None)
 
     return SelectResponse(
         progress=ProgressOut.model_validate(progress),
@@ -402,10 +429,11 @@ def select_word(
 
 def answer_exercise(
     session: Session,
-    word: Word,
+    word: Word | Phrase,
     request: AnswerRequest,
     now: datetime,
     rng: random.Random | None = None,
+    deck: Deck = WORDS,
 ) -> AnswerResponse:
     """Проверить ответ, записать попытку и решить, вернётся ли карточка.
 
@@ -418,7 +446,7 @@ def answer_exercise(
         raise WordNotInStudyError
 
     before = state_from_progress(word.progress)
-    correct = check_answer(word, request.exercise, request.answer)
+    correct = check_answer(word, request.exercise, request.answer, deck)
     used_hint = request.used_hint and request.exercise not in EXERCISES_WITHOUT_HINT
     quality = derive_quality(correct=correct, used_hint=used_hint, attempt=request.attempt)
 
@@ -433,6 +461,7 @@ def answer_exercise(
             show_letters=True,
             attempt=request.attempt + 1,
             rng=rng,
+            deck=deck,
         )
         if repeat
         else None
@@ -453,6 +482,7 @@ def answer_exercise(
         after=before,
         now=now,
         session_id=request.session_id,
+        deck=deck,
     )
     session.flush()
 
@@ -476,6 +506,7 @@ def finish_session(
     mode: SessionMode,
     now: datetime,
     rng: random.Random | None = None,
+    deck: Deck = WORDS,
 ) -> list[SessionFinishResult]:
     """Подвести итог занятия и один раз пересчитать расписание слов.
 
@@ -491,11 +522,10 @@ def finish_session(
     """
     rng = rng or random.Random()
 
-    attempts: dict[int, list[ReviewLog]] = defaultdict(list)
+    Log = deck.log
+    attempts: dict[int, list] = defaultdict(list)
     logs = session.scalars(
-        select(ReviewLog)
-        .where(ReviewLog.session_id == session_id)
-        .order_by(ReviewLog.created_at)
+        select(Log).where(Log.session_id == session_id).order_by(Log.created_at)
     )
     for log in logs:
         attempts[log.word_id].append(log)
@@ -507,7 +537,7 @@ def finish_session(
         if not set(EXERCISE_ROUNDS) <= answered:
             continue
 
-        word = session.get(Word, word_id)
+        word = session.get(deck.item, word_id)
         # FR-020: слово могли вывести из оборота или удалить прямо во время занятия
         if word is None or word.progress is None:
             continue
@@ -544,7 +574,7 @@ def finish_session(
     return results
 
 
-def reset_word(session: Session, word: Word, now: datetime) -> None:
+def reset_word(session: Session, word: Word | Phrase, now: datetime) -> None:
     """Сбросить прогресс: слово снова станет новым."""
     if word.progress is not None:
         session.delete(word.progress)
@@ -554,11 +584,12 @@ def reset_word(session: Session, word: Word, now: datetime) -> None:
 
 def set_word_status(
     session: Session,
-    word: Word,
+    word: Word | Phrase,
     status: WordStatus | Literal["new"],
     now: datetime,
     rng: random.Random | None = None,
-) -> Progress | None:
+    deck: Deck = WORDS,
+):
     """Сменить статус слова вручную — из словаря, а не по ходу занятия.
 
     `new` — не статус, а его отсутствие: строка прогресса удаляется и слово
@@ -572,7 +603,7 @@ def set_word_status(
     progress = word.progress
     if progress is None:
         # Слово ещё не в изучении: заводим строку прогресса, как при «Изучить»
-        progress = Progress(word_id=word.id, started_at=now, updated_at=now)
+        progress = deck.progress(word_id=word.id, started_at=now, updated_at=now)
         write_state(progress, start_learning(now), now)
         session.add(progress)
         word.progress = progress
@@ -585,7 +616,7 @@ def set_word_status(
     return progress
 
 
-def set_word_priority(session: Session, word: Word, priority: bool) -> None:
+def set_word_priority(session: Session, word: Word | Phrase, priority: bool) -> None:
     """Поставить или снять отметку «Учить первым».
 
     Снять можно всегда — у слова с прогрессом отметки и так нет, и запрос
@@ -598,12 +629,13 @@ def set_word_priority(session: Session, word: Word, priority: bool) -> None:
     session.flush()
 
 
-def due_counts(session: Session, now: datetime) -> tuple[int, int]:
-    """Сколько слов готово к повторению сейчас и до конца суток."""
+def due_counts(session: Session, now: datetime, deck: Deck = WORDS) -> tuple[int, int]:
+    """Сколько записей колоды готово к повторению сейчас и до конца суток."""
     end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=999_999)
-    base = select(func.count(Progress.word_id)).where(Progress.status.in_(ACTIVE_STATUSES))
-    now_count = session.scalar(base.where(Progress.due_at <= now)) or 0
-    today_count = session.scalar(base.where(Progress.due_at <= end_of_day)) or 0
+    Prog = deck.progress
+    base = select(func.count(Prog.word_id)).where(Prog.status.in_(ACTIVE_STATUSES))
+    now_count = session.scalar(base.where(Prog.due_at <= now)) or 0
+    today_count = session.scalar(base.where(Prog.due_at <= end_of_day)) or 0
     return now_count, today_count
 
 

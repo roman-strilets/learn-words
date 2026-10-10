@@ -15,7 +15,8 @@ from rapidfuzz.distance import Levenshtein
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.models import ExerciseType, Word
+from app.decks import WORDS, Deck
+from app.models import ExerciseType, Phrase, Word
 from app.schemas import (
     ChoiceEnRuExercise,
     ChoiceRuEnExercise,
@@ -46,16 +47,22 @@ _SPACES = re.compile(r"\s+")
 _TRANSLATION_SPLIT = re.compile(r"[;,]")
 
 
-def normalize_answer(text: str | None) -> str:
+def normalize_answer(text: str | None, *, drop_apostrophes: bool = False) -> str:
     """Привести ответ к канонической форме для сравнения.
 
     Приведение намеренно мягкое: дефисы и подчёркивания считаются пробелами,
     чтобы «out-of-town» и «out of town» засчитывались одинаково.
+
+    `drop_apostrophes` — для фраз: апостроф удаляется, а не заменяется
+    пробелом, и «It's up to you» = «Its up to you». У слов он значим
+    (`o'clock`), поэтому по умолчанию остаётся.
     """
     if not text:
         return ""
     value = unicodedata.normalize("NFKC", text).strip().lower()
     value = _APOSTROPHES.sub("'", value)
+    if drop_apostrophes:
+        value = value.replace("'", "")
     value = _DASHES.sub("-", value)
     value = _SEPARATORS.sub(" ", value)
     value = _PUNCTUATION.sub(" ", value)
@@ -153,34 +160,38 @@ def _stable_rng(word_id: int, attempt: int) -> random.Random:
 
 def pick_distractor_words(
     session: Session,
-    word: Word,
+    word: Word | Phrase,
     *,
     count: int = OPTIONS_COUNT - 1,
     rng: random.Random | None = None,
-) -> list[Word]:
-    """Похожие слова для вариантов ответа.
+    deck: Deck = WORDS,
+) -> list[Word | Phrase]:
+    """Похожие записи той же колоды для вариантов ответа.
 
     Случайные слова делают выбор слишком лёгким, поэтому кандидаты набираются
-    по общему началу/окончанию и ранжируются расстоянием Левенштейна.
+    по общему началу/окончанию и ранжируются расстоянием Левенштейна. Если
+    записей в колоде мало, вариантов меньше `count` — карточка остаётся
+    решаемой, правильный ответ в ней есть всегда.
     """
     rng = rng or random.Random()
+    Item = deck.item
     key = word.word_key
     prefix = key[:3] if len(key) >= 4 else key[:1]
     suffix = key[-3:] if len(key) >= 4 else key[-1:]
 
     stmt = (
-        select(Word)
-        .where(Word.id != word.id)
-        .where(or_(Word.word_key.like(f"{prefix}%"), Word.word_key.like(f"%{suffix}")))
+        select(Item)
+        .where(Item.id != word.id)
+        .where(or_(Item.word_key.like(f"{prefix}%"), Item.word_key.like(f"%{suffix}")))
         .limit(300)
     )
     candidates = list(session.scalars(stmt))
 
     if len(candidates) < DISTRACTOR_POOL:
         band = (
-            select(Word)
-            .where(Word.id != word.id)
-            .where(func.length(Word.word_key).between(len(key) - 2, len(key) + 2))
+            select(Item)
+            .where(Item.id != word.id)
+            .where(func.length(Item.word_key).between(len(key) - 2, len(key) + 2))
             .order_by(func.random())
             .limit(100)
         )
@@ -188,7 +199,7 @@ def pick_distractor_words(
 
     own_translations = translation_variants(word.translation)
     seen: set[int] = set()
-    pool: list[Word] = []
+    pool: list[Word | Phrase] = []
     for candidate in candidates:
         if candidate.id in seen or candidate.word_key == key:
             continue
@@ -203,10 +214,10 @@ def pick_distractor_words(
 
     if len(shortlist) < count:
         filler = (
-            select(Word)
+            select(Item)
             # `word_key` отсекает соседние значения того же слова: два одинаковых
             # варианта ответа в карточке выглядели бы опечаткой.
-            .where(Word.id != word.id, Word.word_key != key, Word.id.notin_(seen or {0}))
+            .where(Item.id != word.id, Item.word_key != key, Item.id.notin_(seen or {0}))
             .order_by(func.random())
             .limit(count * 3)
         )
@@ -235,12 +246,13 @@ def first_letter_hint(word: str) -> str:
 
 def build_exercise(
     session: Session,
-    word: Word,
+    word: Word | Phrase,
     exercise_type: ExerciseType,
     *,
     show_letters: bool = True,
     attempt: int = 1,
     rng: random.Random | None = None,
+    deck: Deck = WORDS,
 ) -> Exercise:
     rng = rng or random.Random()
 
@@ -265,7 +277,7 @@ def build_exercise(
     if exercise_type == ExerciseType.WRITING_RU_EN:
         return WritingRuEnExercise(word_id=word.id, prompt=word.translation)
 
-    distractors = pick_distractor_words(session, word, rng=rng)
+    distractors = pick_distractor_words(session, word, rng=rng, deck=deck)
 
     if exercise_type == ExerciseType.CHOICE_RU_EN:
         options = [word.word] + [d.word for d in distractors]
@@ -288,21 +300,29 @@ def build_exercise(
     )
 
 
-def correct_answer_for(word: Word, exercise_type: ExerciseType) -> str:
+def correct_answer_for(word: Word | Phrase, exercise_type: ExerciseType) -> str:
     """Что показать как правильный ответ после проверки."""
     if exercise_type == ExerciseType.CHOICE_EN_RU:
         return word.translation
     return word.word
 
 
-def check_answer(word: Word, exercise_type: ExerciseType, answer: str | None) -> bool:
+def check_answer(
+    word: Word | Phrase,
+    exercise_type: ExerciseType,
+    answer: str | None,
+    deck: Deck = WORDS,
+) -> bool:
     # Знакомство — не проверка знания: на нём слово показывают, а не спрашивают.
     # Отсюда же следует, что упражнением его никогда не пересобирают: карточку
     # к повтору строят только после неверного ответа, а неверным он не бывает.
     if exercise_type == ExerciseType.INTRO:
         return True
 
-    given = normalize_answer(answer)
+    # Апостроф снимается только с английской стороны: перевод сравнивается
+    # с `translation_variants`, которые нормализованы по правилам слов
+    drop = deck.drop_apostrophes and exercise_type != ExerciseType.CHOICE_EN_RU
+    given = normalize_answer(answer, drop_apostrophes=drop)
     if not given:
         return False
 
@@ -312,4 +332,4 @@ def check_answer(word: Word, exercise_type: ExerciseType, answer: str | None) ->
             word.translation
         )
 
-    return given == normalize_answer(word.word)
+    return given == normalize_answer(word.word, drop_apostrophes=drop)

@@ -2,7 +2,8 @@ import { useId, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
 
-import { api } from '../api/client'
+import { deckApi, queryKeys } from '../api/client'
+import type { Deck } from '../api/types'
 
 /** Совпадает с `LABEL_NAME_MAX` на сервере: длиннее он ответит 422. */
 const LABEL_NAME_MAX = 50
@@ -23,9 +24,12 @@ const same = (a: string, b: string) => a.toLocaleLowerCase() === b.toLocaleLower
  * создать.
  */
 export function LabelPicker({
+  deck = 'words',
   value,
   onChange,
 }: {
+  /** Чьи метки подсказывать: у слов и фраз они свои */
+  deck?: Deck
   value: string[]
   onChange: (next: string[]) => void
 }) {
@@ -33,7 +37,10 @@ export function LabelPicker({
   const [text, setText] = useState('')
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(0)
-  const { data: labels = [] } = useQuery({ queryKey: ['labels'], queryFn: api.listLabels })
+  const { data: labels = [] } = useQuery({
+    queryKey: queryKeys(deck).labels,
+    queryFn: deckApi(deck).listLabels,
+  })
 
   const query = text.trim()
   const options: Option[] = []

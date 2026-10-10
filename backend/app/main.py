@@ -23,6 +23,11 @@ app.include_router(words.router, prefix="/api")
 app.include_router(study.router, prefix="/api")
 app.include_router(stats.router, prefix="/api")
 app.include_router(labels.router, prefix="/api")
+# Фразы — отдельная колода под своими префиксами, с теми же схемами ответов
+app.include_router(words.phrases_router, prefix="/api")
+app.include_router(study.phrase_study_router, prefix="/api")
+app.include_router(stats.phrase_stats_router, prefix="/api")
+app.include_router(labels.phrase_labels_router, prefix="/api")
 # Роутер настроек импортирован под другим именем: `settings` здесь уже занято конфигом
 app.include_router(settings_router.router, prefix="/api")
 

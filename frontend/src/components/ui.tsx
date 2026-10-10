@@ -115,6 +115,7 @@ export function TextField({
   onChange,
   required,
   autoFocus,
+  maxLength,
   className = '',
 }: {
   label: string
@@ -122,6 +123,7 @@ export function TextField({
   onChange: (value: string) => void
   required?: boolean
   autoFocus?: boolean
+  maxLength?: number
   className?: string
 }) {
   return (
@@ -134,6 +136,7 @@ export function TextField({
         value={value}
         onChange={(event) => onChange(event.target.value)}
         autoFocus={autoFocus}
+        maxLength={maxLength}
         autoComplete="off"
         className={`w-full rounded border border-hairline px-4 py-3 outline-none focus:border-accent ${className}`}
       />
