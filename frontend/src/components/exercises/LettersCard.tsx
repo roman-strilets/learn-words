@@ -185,10 +185,11 @@ export function LettersCard({
       </Prompt>
 
       {/* Ячейки сгруппированы по словам: фраза переносится между словами,
-          а не посреди слова */}
+          а не посреди слова. Слово длиннее строки не вылезает за панель —
+          ячейки сжимаются, а буква в них уменьшается вместе с ячейкой */}
       <div className="flex w-full flex-wrap items-center justify-center gap-x-8 gap-y-4 rounded bg-panel px-6 py-12">
         {maskWords(exercise.mask).map((word) => (
-          <span key={word[0]} className="flex items-center gap-2">
+          <span key={word[0]} className="flex max-w-full items-center gap-1 sm:gap-2">
             {word.map((index) =>
               exercise.mask[index] === '_' ? (
                 <button
@@ -196,14 +197,16 @@ export function LettersCard({
                   type="button"
                   disabled={locked}
                   onClick={() => clearFrom(positions.indexOf(index))}
-                  className={`flex size-14 items-center justify-center bg-white text-2xl font-semibold text-ink ${
+                  className={`@container flex aspect-square w-14 min-w-0 items-center justify-center bg-white font-semibold text-ink ${
                     index === activeMaskIndex ? 'ring-2 ring-accent' : ''
                   }`}
                 >
-                  {slots.find((slot) => slot.maskIndex === index)?.char ?? ''}
+                  <span className="text-[min(1.5rem,55cqw)]">
+                    {slots.find((slot) => slot.maskIndex === index)?.char ?? ''}
+                  </span>
                 </button>
               ) : (
-                <span key={index} className="w-6 text-center text-2xl text-muted">
+                <span key={index} className="w-6 shrink-0 text-center text-2xl text-muted">
                   {exercise.mask[index]}
                 </span>
               ),
