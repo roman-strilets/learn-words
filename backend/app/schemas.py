@@ -94,8 +94,13 @@ class LabelUpdate(BaseModel):
         return self
 
 
+# Предел слова в форме; импорт CSV пропускает строки длиннее — так он не заводит
+# записей, которые форма потом не дала бы сохранить
+WORD_MAX_LENGTH = 128
+
+
 class WordBase(BaseModel):
-    word: str = Field(min_length=1, max_length=128)
+    word: str = Field(min_length=1, max_length=WORD_MAX_LENGTH)
     translation: str = Field(min_length=1)
     example: str | None = None
     example_translation: str | None = None
@@ -122,7 +127,7 @@ class WordCreate(WordBase):
 
 
 class WordUpdate(BaseModel):
-    word: str | None = Field(default=None, min_length=1, max_length=128)
+    word: str | None = Field(default=None, min_length=1, max_length=WORD_MAX_LENGTH)
     translation: str | None = Field(default=None, min_length=1)
     example: str | None = None
     example_translation: str | None = None
@@ -199,6 +204,35 @@ class WordPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+# ---------------------------------------------------------------- импорт из CSV
+
+
+class ImportSkippedRow(BaseModel):
+    """Строка файла, пропущенная при импорте: номер как в табличном редакторе и причина."""
+
+    line: int
+    reason: str
+
+
+class ImportReport(BaseModel):
+    """Итог одного импорта CSV. Нигде не хранится: показывается сразу после импорта.
+
+    Счётчики считают строки файла, а не записи словаря, и каждая строка попадает
+    ровно в один: `rows == created + merged + unchanged + skipped`. В
+    `skipped_rows` — не больше `import_skipped_report_max` пропусков, полное их
+    число — в `skipped`.
+    """
+
+    rows: int
+    created: int
+    merged: int
+    unchanged: int
+    skipped: int
+    skipped_rows: list[ImportSkippedRow]
+    labels_created: list[str]
+    ignored_columns: list[str]
 
 
 # ----------------------------------------------------------------------- разметка

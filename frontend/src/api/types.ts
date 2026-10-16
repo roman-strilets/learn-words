@@ -77,6 +77,28 @@ export interface WordPage {
   offset: number
 }
 
+/** Строка файла, пропущенная при импорте: номер как в табличном редакторе. */
+export interface ImportSkippedRow {
+  line: number
+  reason: string
+}
+
+/**
+ * Итог импорта CSV. Счётчики считают строки файла:
+ * `rows == created + merged + unchanged + skipped`. В `skipped_rows` — не все
+ * пропуски, если их много; полное число — в `skipped`.
+ */
+export interface ImportReport {
+  rows: number
+  created: number
+  merged: number
+  unchanged: number
+  skipped: number
+  skipped_rows: ImportSkippedRow[]
+  labels_created: string[]
+  ignored_columns: string[]
+}
+
 /** Фильтры «Словаря», с которыми открыта разметка: значат то же, что у списка. */
 export interface ClassifyFilters {
   search?: string

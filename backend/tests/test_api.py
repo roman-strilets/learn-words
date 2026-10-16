@@ -21,7 +21,10 @@ from app.config import settings
 from app.main import app
 from app.models import (
     ExerciseType,
+    GroupReviewLog,
     Label,
+    Phrase,
+    PhraseReviewLog,
     Progress,
     ReviewLog,
     Setting,
@@ -2307,3 +2310,428 @@ def test_bad_label_description_is_rejected(client: TestClient, db_session: Sessi
     assert client.patch(f"/api/labels/{label.id}", json=too_long).status_code == 422
     # Частичное обновление без единого поля — ошибка, а не тихий успех
     assert client.patch(f"/api/labels/{label.id}", json={}).status_code == 422
+
+
+# ------------------------------------------------------------- импорт из CSV
+
+IMPORT_HEADER = "слово;перевод;пример;перевод примера;метка\n"
+
+
+def _import(client: TestClient, body: str | bytes, status_code: int = 200) -> dict:
+    """Отправить файл импорта сырым телом, как это делает панель «Словаря»."""
+    content = body.encode() if isinstance(body, str) else body
+    response = client.post(
+        "/api/words/import", content=content, headers={"Content-Type": "text/csv"}
+    )
+    assert response.status_code == status_code, response.text
+    return response.json()
+
+
+def _assert_report_adds_up(report: dict) -> None:
+    assert report["rows"] == (
+        report["created"] + report["merged"] + report["unchanged"] + report["skipped"]
+    )
+
+
+def _words_by_key(db_session: Session) -> dict[str, Word]:
+    db_session.expire_all()
+    return {word.word_key: word for word in db_session.scalars(select(Word))}
+
+
+def test_import_creates_new_words_with_labels(client: TestClient, db_session: Session):
+    report = _import(
+        client,
+        IMPORT_HEADER
+        + "saucepan;кастрюля;Put the saucepan on the stove.;Поставь кастрюлю на плиту.;Кухня\n"
+        + "whisk;венчик;;;кухня\n"
+        + "ladle;половник;;;\n",
+    )
+
+    # US1, FR-004
+    assert report == {
+        "rows": 3,
+        "created": 3,
+        "merged": 0,
+        "unchanged": 0,
+        "skipped": 0,
+        "skipped_rows": [],
+        "labels_created": ["Кухня"],
+        "ignored_columns": [],
+    }
+    by_key = _words_by_key(db_session)
+    saucepan = by_key["saucepan"]
+    assert saucepan.progress is None
+    assert saucepan.translation == "кастрюля"
+    assert saucepan.example == "Put the saucepan on the stove."
+    assert saucepan.example_translation == "Поставь кастрюлю на плиту."
+    assert [label.name for label in saucepan.labels] == ["Кухня"]
+    # Вторая строка с «кухня» взяла ту же метку, а не завела новую
+    assert [label.name for label in by_key["whisk"].labels] == ["Кухня"]
+    assert by_key["ladle"].labels == []
+    assert by_key["ladle"].example is None
+
+    labels = client.get("/api/labels").json()
+    assert [(label["name"], label["word_count"]) for label in labels] == [("Кухня", 2)]
+    listed = client.get("/api/words", params={"search": "saucepan"}).json()["items"][0]
+    assert listed["progress"] is None
+
+
+def test_import_reuses_an_existing_label(client: TestClient, db_session: Session):
+    kitchen = _label(db_session, "Кухня")
+    kitchen.description = "kitchen tools"
+    db_session.commit()
+
+    report = _import(client, IMPORT_HEADER + "whisk;венчик;;;  кухня \n")
+
+    # US1, сценарий 3
+    assert report["labels_created"] == []
+    whisk = _words_by_key(db_session)["whisk"]
+    assert [label.id for label in whisk.labels] == [kitchen.id]
+    db_session.refresh(kitchen)
+    assert (kitchen.name, kitchen.description) == ("Кухня", "kitchen tools")
+    assert _count(db_session, Label) == 1
+
+
+def test_imported_words_are_learned_in_file_order(client: TestClient, db_session: Session):
+    names = ["zebra", "apple", "mango", "kiwi", "banana"]
+    _import(client, "word,translation\n" + "".join(f"{name},перевод {name}\n" for name in names))
+
+    # FR-019: порядок добавления — порядок строк файла
+    ids = [_words_by_key(db_session)[name].id for name in names]
+    assert ids == sorted(ids)
+    offered = [w["word"] for w in _session(client, "learn")["new_words"]]
+    assert offered == names
+
+
+def test_import_is_not_an_answer(client: TestClient, db_session: Session):
+    _import(client, IMPORT_HEADER + "saucepan;кастрюля;;;Кухня\nwhisk;венчик;;;\n")
+
+    # FR-011, FR-020
+    assert _count(db_session, ReviewLog) == 0
+    assert _count(db_session, PhraseReviewLog) == 0
+    assert _count(db_session, GroupReviewLog) == 0
+    assert _count(db_session, Phrase) == 0
+    assert _count(db_session, Progress) == 0
+
+
+def test_import_skips_a_row_without_a_translation(client: TestClient, db_session: Session):
+    report = _import(client, IMPORT_HEADER + "saucepan;кастрюля;;;\nwhisk;;;;\nladle;половник;;;\n")
+
+    assert report["created"] == 2
+    assert report["skipped"] == 1
+    assert report["skipped_rows"] == [{"line": 3, "reason": "нет перевода"}]
+    _assert_report_adds_up(report)
+    assert set(_words_by_key(db_session)) == {"saucepan", "ladle"}
+
+
+def test_import_without_a_translation_column_changes_nothing(
+    client: TestClient, db_session: Session, words: list[Word]
+):
+    body = _import(client, "слово;пример;метка\nsaucepan;On it.;Кухня\n", status_code=422)
+
+    # US3, сценарий 2
+    assert isinstance(body["detail"], str)
+    assert "перевод" in body["detail"]
+    assert _count(db_session, Word) == len(words)
+    assert _count(db_session, Label) == 0
+
+
+# ------------------------------------------------- импорт из CSV: слияние (US2)
+
+
+def _word(db_session: Session, word: str, translation: str, **fields) -> Word:
+    """Завести запись прямо в базе — как будто её добавили вручную."""
+    item = Word(
+        word=word, word_key=word.lower(), translation=translation, created_at=utcnow(), **fields
+    )
+    db_session.add(item)
+    db_session.commit()
+    return item
+
+
+def _dictionary_snapshot(db_session: Session) -> tuple[list[tuple], list[tuple]]:
+    """Всё, что импорт мог бы поменять в словаре: записи с метками и сами метки."""
+    db_session.expire_all()
+    words = [
+        (
+            w.id,
+            w.word,
+            w.word_key,
+            w.translation,
+            w.example,
+            w.example_translation,
+            w.priority,
+            tuple(label.id for label in w.labels),
+        )
+        for w in db_session.scalars(select(Word).order_by(Word.id))
+    ]
+    labels = [
+        (label.id, label.name, label.name_key, label.description)
+        for label in db_session.scalars(select(Label).order_by(Label.id))
+    ]
+    return words, labels
+
+
+def test_import_of_the_same_pair_changes_nothing(client: TestClient, db_session: Session):
+    _word(db_session, "saucepan", "кастрюля")
+    before = _dictionary_snapshot(db_session)
+
+    report = _import(client, IMPORT_HEADER + "  SaucePan ; Кастрюля \n")
+
+    # US2, сценарий 1; FR-006
+    assert (report["created"], report["merged"], report["unchanged"]) == (0, 0, 1)
+    assert _dictionary_snapshot(db_session) == before
+
+
+def test_import_appends_a_new_translation(client: TestClient, db_session: Session):
+    _word(db_session, "saucepan", "кастрюля")
+
+    report = _import(client, IMPORT_HEADER + "saucepan;сотейник;;;\n")
+
+    # FR-007
+    assert report["merged"] == 1
+    assert report["created"] == 0
+    assert _count(db_session, Word) == 1
+    assert _words_by_key(db_session)["saucepan"].translation == "кастрюля; сотейник"
+
+
+def test_import_picks_the_record_with_that_meaning(client: TestClient, db_session: Session):
+    first = _word(db_session, "roll out", "вылезать")
+    second = _word(db_session, "roll out", "внедрить")
+
+    report = _import(client, IMPORT_HEADER + "roll out;внедрить;We roll it out.;Внедряем.;IT\n")
+
+    # FR-008
+    assert report["merged"] == 1
+    db_session.expire_all()
+    assert first.labels == [] and first.example is None
+    assert first.translation == "вылезать"
+    assert [label.name for label in second.labels] == ["IT"]
+    assert second.example == "We roll it out."
+    assert second.translation == "внедрить"
+
+
+def test_import_fills_only_an_empty_example(client: TestClient, db_session: Session):
+    kept = _word(
+        db_session, "brink", "край", example="On the brink.", example_translation="На грани."
+    )
+    filled = _word(db_session, "budge", "сдвинуть с места")
+
+    report = _import(
+        client,
+        IMPORT_HEADER
+        + "brink;край;Other example.;Другой пример.;\n"
+        + "budge;сдвинуть с места;It won't budge.;Не сдвинется.;\n",
+    )
+
+    # FR-009
+    assert (report["merged"], report["unchanged"]) == (1, 1)
+    db_session.expire_all()
+    assert (kept.example, kept.example_translation) == ("On the brink.", "На грани.")
+    assert (filled.example, filled.example_translation) == ("It won't budge.", "Не сдвинется.")
+
+
+def test_import_adds_labels_and_keeps_the_old_ones(client: TestClient, db_session: Session):
+    word = _word(db_session, "run", "бежать")
+    _label(db_session, "Глаголы", word)
+
+    report = _import(client, IMPORT_HEADER + "run;бежать;;;Кухня\n")
+
+    # FR-010
+    assert report["merged"] == 1
+    assert report["labels_created"] == ["Кухня"]
+    db_session.expire_all()
+    assert [label.name for label in word.labels] == ["Глаголы", "Кухня"]
+
+
+def test_import_keeps_progress_and_priority(client: TestClient, db_session: Session):
+    learned = _word(db_session, "brink", "край")
+    raised = _word(db_session, "budge", "сдвинуть с места", priority=True)
+    due = utcnow() + timedelta(days=12)
+    db_session.add(
+        Progress(
+            word_id=learned.id,
+            status=WordStatus.REVIEW,
+            step=4,
+            repetitions=3,
+            ease=2.2,
+            interval_days=12.0,
+            due_at=due,
+            lapses=2,
+        )
+    )
+    db_session.commit()
+    before = {
+        word_id: client.get(f"/api/words/{word_id}").json()
+        for word_id in (learned.id, raised.id)
+    }
+
+    report = _import(
+        client, IMPORT_HEADER + "brink;грань;;;Кухня\nbudge;шевельнуться;Budge!;Шевелись!;Кухня\n"
+    )
+
+    # FR-011, SC-004, US2 сценарий 7
+    assert report["merged"] == 2
+    for word_id, was in before.items():
+        now = client.get(f"/api/words/{word_id}").json()
+        assert now["progress"] == was["progress"]
+        assert now["priority"] == was["priority"]
+    assert before[raised.id]["priority"] is True
+    assert before[learned.id]["progress"]["status"] == WordStatus.REVIEW
+    assert _count(db_session, ReviewLog) == 0
+    assert _count(db_session, GroupReviewLog) == 0
+    assert _count(db_session, PhraseReviewLog) == 0
+
+
+def test_repeated_word_in_one_file_merges(client: TestClient, db_session: Session):
+    report = _import(
+        client, IMPORT_HEADER + "pan;кастрюля;;;Кухня\nPan;сковорода;;;Посуда\n"
+    )
+
+    # Edge Cases: строки одного слова сливаются по тем же правилам
+    assert (report["created"], report["merged"]) == (1, 1)
+    assert report["labels_created"] == ["Кухня", "Посуда"]
+    assert _count(db_session, Word) == 1
+    pan = _words_by_key(db_session)["pan"]
+    assert pan.translation == "кастрюля; сковорода"
+    assert [label.name for label in pan.labels] == ["Кухня", "Посуда"]
+    _assert_report_adds_up(report)
+
+
+def test_the_same_file_twice_changes_nothing(client: TestClient, db_session: Session):
+    _word(db_session, "saucepan", "кастрюля")
+    body = (
+        IMPORT_HEADER
+        + "saucepan;сотейник;On the stove.;На плите.;Кухня\n"
+        + 'whisk;венчик;;;"Кухня; Посуда"\n'
+        + "ladle;половник;;;\n"
+        + "whisk;взбивалка;;;\n"
+    )
+    first = _import(client, body)
+    after_first = _dictionary_snapshot(db_session)
+
+    second = _import(client, body)
+
+    # FR-012, SC-003
+    assert first["created"] == 2
+    assert second["created"] == second["merged"] == 0
+    assert second["labels_created"] == []
+    assert second["unchanged"] == second["rows"] == 4
+    assert _dictionary_snapshot(db_session) == after_first
+
+
+def test_a_large_file_imported_twice_changes_nothing(client: TestClient, db_session: Session):
+    lines = ["word,translation,example,example_translation,labels"]
+    for index in range(1000):
+        if index % 10 == 9:
+            # Повтор уже встреченного слова с другим значением
+            lines.append(f"word{index - 9},значение {index},,,")
+        elif index % 7 == 0:
+            lines.append(
+                f"word{index},перевод {index},Example {index}.,Пример {index}.,"
+                f'"тема {index % 5}; общее"'
+            )
+        else:
+            lines.append(f"word{index},перевод {index},,,")
+    body = "\n".join(lines) + "\n"
+
+    first = _import(client, body)
+    after_first = _dictionary_snapshot(db_session)
+    second = _import(client, body)
+
+    # SC-002, SC-003 на файле, собранном в тесте, а не на `dictionary.csv`
+    assert first["rows"] == 1000
+    assert first["created"] == 900
+    assert first["merged"] == 100
+    assert first["skipped"] == 0
+    assert second["created"] == second["merged"] == 0
+    assert second["unchanged"] == 1000
+    assert _dictionary_snapshot(db_session) == after_first
+
+
+# -------------------------------------------- импорт из CSV: отчёт и ошибки (US3)
+
+
+def test_import_rejects_a_too_large_file(
+    client: TestClient, db_session: Session, words: list[Word], monkeypatch
+):
+    monkeypatch.setattr(settings, "import_max_bytes", 40)
+    before = _dictionary_snapshot(db_session)
+
+    body = _import(client, IMPORT_HEADER + "saucepan;кастрюля;;;\n", status_code=413)
+
+    assert body["detail"].startswith("Файл больше ")
+    assert body["detail"].endswith(" МБ")
+    assert _dictionary_snapshot(db_session) == before
+
+
+def test_import_rejects_an_empty_body(client: TestClient):
+    body = _import(client, b"", status_code=422)
+
+    assert body["detail"] == "Файл пустой"
+
+
+def test_import_reports_skipped_rows(client: TestClient, db_session: Session):
+    report = _import(
+        client,
+        IMPORT_HEADER
+        + "saucepan;кастрюля;;;\n"
+        + "whisk;;;;\n"
+        + "ladle;половник;;;\n"
+        + f"{'w' * 129};длинное;;;\n"
+        + "spoon;ложка;;;\n",
+    )
+
+    # US3, Independent Test
+    assert (report["rows"], report["created"], report["skipped"]) == (5, 3, 2)
+    assert report["skipped_rows"] == [
+        {"line": 3, "reason": "нет перевода"},
+        {"line": 5, "reason": "слово длиннее 128 символов"},
+    ]
+    _assert_report_adds_up(report)
+    assert set(_words_by_key(db_session)) == {"saucepan", "ladle", "spoon"}
+
+
+def test_import_report_lists_ignored_columns(client: TestClient):
+    report = _import(client, "слово;перевод;источник\npan;кастрюля;книга\n")
+
+    assert report["ignored_columns"] == ["источник"]
+    assert report["created"] == 1
+
+
+def test_import_report_caps_the_skipped_list(client: TestClient, monkeypatch):
+    monkeypatch.setattr(settings, "import_skipped_report_max", 1)
+
+    report = _import(client, IMPORT_HEADER + "a;;;;\nb;;;;\nc;;;;\nok;хорошо;;;\n")
+
+    assert report["skipped"] == 3
+    assert report["skipped_rows"] == [{"line": 2, "reason": "нет перевода"}]
+    _assert_report_adds_up(report)
+
+
+def test_failed_import_leaves_the_dictionary_untouched(
+    client: TestClient, db_session: Session, monkeypatch
+):
+    import app.word_import as word_import
+
+    real = word_import.word_key_for
+    calls = 0
+
+    def failing(word: str) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise RuntimeError("сбой посреди импорта")
+        return real(word)
+
+    monkeypatch.setattr(word_import, "word_key_for", failing)
+
+    # TestClient пробрасывает исключения сервера
+    with pytest.raises(RuntimeError):
+        _import(client, IMPORT_HEADER + "pan;кастрюля;;;Кухня\npot;горшок;;;Кухня\ncup;чашка;;;\n")
+
+    # FR-015: половины файла в словаре не остаётся, метка тоже не создана
+    assert calls == 3
+    db_session.expire_all()
+    assert _count(db_session, Word) == 0
+    assert _count(db_session, Label) == 0

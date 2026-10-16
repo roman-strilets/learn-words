@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import group_study, labels, stats, study, words
+from app.routers import group_study, labels, stats, study, word_import, words
 from app.routers import settings as settings_router
 
 app = FastAPI(
@@ -19,6 +19,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Раньше `words.router`: `/words/import` не должен даже пробоваться как `/words/{word_id}`
+app.include_router(word_import.router, prefix="/api")
 app.include_router(words.router, prefix="/api")
 app.include_router(study.router, prefix="/api")
 app.include_router(stats.router, prefix="/api")

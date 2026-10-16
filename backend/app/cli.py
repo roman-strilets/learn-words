@@ -21,8 +21,9 @@ from sqlalchemy import select
 
 from app.clock import utcnow
 from app.db import SessionLocal
-from app.exercises import translation_variants, word_key_for
+from app.exercises import word_key_for
 from app.models import Word
+from app.word_import import merge_translation, row_for_translation
 
 # Файл выгружен с BOM — обычный utf-8 оставил бы «﻿word» в имени первой колонки.
 CSV_ENCODING = "utf-8-sig"
@@ -43,31 +44,6 @@ class ImportReport:
             f"дополнено существующих: {self.merged}\n"
             f"пропущено (пустых): {self.skipped}"
         )
-
-
-def _row_for_translation(rows: list[Word], translation: str) -> Word | None:
-    """Куда дописывать значение из CSV.
-
-    У слова может быть несколько записей — по одной на значение, заведённых
-    вручную. Импорт дописывает в ту, где это значение уже есть, а если такой
-    нет — в первую: новые записи под каждое значение он не плодит.
-    """
-    if not rows:
-        return None
-    variants = translation_variants(translation)
-    for row in rows:
-        if translation_variants(row.translation) & variants:
-            return row
-    return rows[0]
-
-
-def _merge_translation(existing: str, incoming: str) -> str:
-    """Дописать новое значение к переводу, если его там ещё нет."""
-    if not incoming:
-        return existing
-    if translation_variants(incoming) <= translation_variants(existing):
-        return existing
-    return f"{existing}; {incoming}"
 
 
 def import_csv(path: Path, session) -> ImportReport:
@@ -98,7 +74,7 @@ def import_csv(path: Path, session) -> ImportReport:
             example = (row.get("example") or "").strip() or None
             example_translation = (row.get("example_translation") or "").strip() or None
 
-            existing = _row_for_translation(index[key], translation)
+            existing = row_for_translation(index[key], translation)
             if existing is None:
                 word = Word(
                     word=word_text,
@@ -114,7 +90,7 @@ def import_csv(path: Path, session) -> ImportReport:
                 continue
 
             changed = False
-            merged = _merge_translation(existing.translation, translation)
+            merged = merge_translation(existing.translation, translation)
             if merged != existing.translation:
                 existing.translation = merged
                 changed = True

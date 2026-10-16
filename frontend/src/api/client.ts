@@ -15,6 +15,7 @@ import type {
   GroupFinishResult,
   GroupSessionPayload,
   GroupSummary,
+  ImportReport,
   Label,
   LabelUpdate,
   SelectResponse,
@@ -250,6 +251,16 @@ export const api = {
     request<ClassifyBatch>('/labels/classify', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }),
+
+  // Файл уходит как есть, сырыми байтами: декодирует сервер и сам объясняет
+  // ошибку кодировки, а `File.text()` молча заменил бы чужие байты на «�».
+  // Свой заголовок перекрывает JSON-заголовок `request()`: `init` идёт после него
+  importWords: (file: File) =>
+    request<ImportReport>('/words/import', {
+      method: 'POST',
+      body: file,
+      headers: { 'Content-Type': 'text/csv' },
     }),
 
   getSettings: () => request<AppSettings>('/settings'),
