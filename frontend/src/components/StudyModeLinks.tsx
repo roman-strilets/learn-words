@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { Link } from 'react-router'
 
 import type { Deck, StudyMode } from '../api/types'
@@ -23,13 +24,18 @@ export function studyPath(mode: StudyMode, deck: Deck = 'words'): string {
   return deck === 'words' ? `/study?mode=${mode}` : `/study?deck=${deck}&mode=${mode}`
 }
 
-/** Две кнопки старта занятия: подписи снизу показывают, сколько записей готово. */
+/**
+ * Две кнопки старта занятия: подписи снизу показывают, сколько записей готово.
+ * `children` встают в тот же ряд — так у слов появляется «Учить группу».
+ */
 export function StudyModeLinks({
   deck = 'words',
   hints,
+  children,
 }: {
   deck?: Deck
   hints?: Record<StudyMode, string>
+  children?: ReactNode
 }) {
   return (
     <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-start">
@@ -44,6 +50,7 @@ export function StudyModeLinks({
           {hints ? <span className="text-sm text-muted">{hints[mode]}</span> : null}
         </div>
       ))}
+      {children}
     </div>
   )
 }

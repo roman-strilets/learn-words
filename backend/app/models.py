@@ -181,6 +181,78 @@ class ReviewLog(Base):
     session_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 
 
+# ------------------------------------------------------------ занятие по группе
+#
+# Занятие по группе (по метке слов) не трогает основное обучение: ни `progress`,
+# ни `review_log`, ни статистику. Поэтому у него свои таблицы — круг группы
+# и журнал ответов (research R1, R2).
+
+
+class GroupCycleWord(Base):
+    """Место одного слова в одном круге одной метки.
+
+    Строка на (метка, круг, слово), а не одна на (метка, слово): порядок круга
+    фиксируется один раз и переживает перезагрузку и прерванное занятие, а на
+    стыке кругов слову нужны сразу две позиции — в остатке текущего круга и в
+    уже выбранном порядке следующего (research R2). Живут не больше двух кругов
+    метки; старшие удаляет сборка занятия. Строки слова, потерявшего метку, не
+    удаляются: вернётся метка — вернётся и место в круге (research R5).
+    """
+
+    __tablename__ = "group_cycle_words"
+
+    label_id: Mapped[int] = mapped_column(
+        ForeignKey("labels.id", ondelete="CASCADE"), primary_key=True
+    )
+    cycle: Mapped[int] = mapped_column(Integer, primary_key=True)
+    word_id: Mapped[int] = mapped_column(
+        ForeignKey("words.id", ondelete="CASCADE"), primary_key=True
+    )
+    # Место в порядке круга, с 0; слова, получившие метку позже, — в конец
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Когда слово прошло все раунды в этом круге; NULL — ещё не пройдено
+    done_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Ключ занятия, которым слово пройдено: повторный `finish` не закроет ему
+    # ещё и следующий круг (research R6)
+    done_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+    # Ключ начинается с `label_id`; каскаду удаления слова нужен поиск по `word_id`
+    __table_args__ = (Index("ix_group_cycle_words_word_id", "word_id"),)
+
+
+class GroupReviewLog(Base):
+    """По строке на каждый ответ в занятии по группе.
+
+    Отдельно от `review_log`, чтобы статистика и `finish` обычных занятий не
+    видели групповых попыток без единого фильтра. Колонок расписания нет: в
+    занятии по группе переходов расписания не бывает, а у нового слова нет и
+    статуса (research R1).
+    """
+
+    __tablename__ = "group_review_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    word_id: Mapped[int] = mapped_column(
+        ForeignKey("words.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # NULL — метку удалили потом: попытки остаются и в обычные не превращаются
+    label_id: Mapped[int | None] = mapped_column(
+        ForeignKey("labels.id", ondelete="SET NULL"), nullable=True
+    )
+    exercise: Mapped[str] = mapped_column(String(24), nullable=False)
+    correct: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    used_hint: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Оценка по `derive_quality` — для будущей статистики групп, расписания не меняет
+    quality: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    session_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False, index=True
+    )
+
+
 # --------------------------------------------------------------------- фразы
 #
 # Фразы — вторая колода со своим словарём, метками, прогрессом и журналом.

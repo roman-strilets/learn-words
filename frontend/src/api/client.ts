@@ -10,6 +10,11 @@ import type {
   DailyStat,
   Deck,
   ExerciseRound,
+  GroupAnswerPayload,
+  GroupAnswerResponse,
+  GroupFinishResult,
+  GroupSessionPayload,
+  GroupSummary,
   Label,
   LabelUpdate,
   SelectResponse,
@@ -198,6 +203,42 @@ export function queryKeys(deck: Deck) {
         overview: ['overview', 'phrases'] as const,
         daily: (days: number) => ['daily', 'phrases', days] as const,
       }
+}
+
+/**
+ * Занятие по группе — слова одной метки, пять раундов без знакомства.
+ * Расписание, статусы и статистику оно не трогает, поэтому маршруты свои.
+ */
+export const groupApi = {
+  groups: () => request<GroupSummary[]>('/group-study/groups'),
+
+  // POST, а не GET: сборка порции заводит строки круга группы на сервере
+  session: (labelId: number) =>
+    request<GroupSessionPayload>('/group-study/session', {
+      method: 'POST',
+      body: JSON.stringify({ label_id: labelId }),
+    }),
+
+  answer: (payload: GroupAnswerPayload) =>
+    request<GroupAnswerResponse>('/group-study/answer', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  // Слова, прошедшие все раунды, сервер отмечает пройденными в их круге
+  finish: (sessionId: string) =>
+    request<GroupFinishResult[]>('/group-study/finish', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sessionId }),
+    }),
+
+  // Новый круг в новом порядке; прогресс слов не меняется
+  restart: (labelId: number) =>
+    request<void>(`/group-study/groups/${labelId}/restart`, { method: 'POST' }),
+}
+
+export const groupQueryKeys = {
+  groups: ['group-study', 'groups'] as const,
 }
 
 export const api = {

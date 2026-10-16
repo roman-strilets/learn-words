@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router'
 
 import { deckApi, queryKeys } from '../api/client'
 import type { Deck, StatsOverview } from '../api/types'
@@ -51,7 +52,20 @@ function DeckBlock({ deck, data }: { deck: Deck; data: StatsOverview }) {
           learn: `${data.new} ${plural(data.new, text.fresh)}`,
           review: `${data.due_now} ${plural(data.due_now, text.due)}`,
         }}
-      />
+      >
+        {/* Занятие по метке есть только у слов: у фраз своих групп нет */}
+        {deck === 'words' ? (
+          <div className="flex flex-col items-center gap-1">
+            <Link
+              to="/study/group"
+              className="rounded-md bg-neutral-btn px-10 py-4 text-xl font-semibold text-white transition-colors hover:bg-neutral-btn-hover"
+            >
+              Учить группу
+            </Link>
+            <span className="text-sm text-muted">по метке</span>
+          </div>
+        ) : null}
+      </StudyModeLinks>
 
       <dl className="flex flex-wrap justify-center gap-x-8 gap-y-2 text-sm text-muted">
         <div className="flex gap-2">

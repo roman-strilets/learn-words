@@ -511,6 +511,91 @@ class SessionFinishResult(BaseModel):
     progress: ProgressOut
 
 
+# ------------------------------------------------------------ занятие по группе
+
+
+class GroupOut(BaseModel):
+    """Метка слов в выборе группы: сколько в ней слов и где она в своём круге."""
+
+    label_id: int
+    name: str
+    # Члены группы в любом статусе, с прогрессом и без
+    word_count: int
+    # Пройдено в текущем круге, 0..word_count
+    done: int
+    # Номер текущего круга; 0 — по группе ещё не занимались
+    cycle: int
+
+
+class GroupSessionRequest(BaseModel):
+    label_id: int
+
+
+class GroupSessionOut(BaseModel):
+    """Порция группы: те же пять раундов, что у повторения, без знакомства.
+
+    `session_id` — ключ, по которому `finish` найдёт попытки порции в
+    `group_review_log`; `None`, когда в группе нет слов и занятия нет."""
+
+    label_id: int
+    name: str
+    session_id: str | None = None
+    rounds: list[ExerciseRound] = Field(default_factory=list)
+    word_count: int
+    # Пройдено в текущем круге до этого занятия
+    done: int
+    cycle: int
+
+
+class GroupAnswerRequest(BaseModel):
+    """Ответ на карточку занятия по группе. Метка нужна, чтобы отказать слову,
+    с которого её сняли посреди занятия, и записать её в журнал."""
+
+    word_id: int
+    label_id: int
+    session_id: str
+    exercise: ExerciseType
+    answer: str | None = None
+    used_hint: bool = False
+    attempt: int = Field(default=1, ge=1)
+    duration_ms: int | None = Field(default=None, ge=0)
+
+    @field_validator("exercise")
+    @classmethod
+    def _no_intro(cls, v: ExerciseType) -> ExerciseType:
+        # Знакомства в занятии по группе нет: засчитать его — значит засчитать
+        # слово без вопроса
+        if v is ExerciseType.INTRO:
+            raise ValueError("В занятии по группе знакомства нет")
+        return v
+
+
+class GroupAnswerResponse(BaseModel):
+    """Те же поля, что у `AnswerResponse`, кроме прогресса: занятие по группе
+    его не читает и не меняет."""
+
+    correct: bool
+    correct_answer: str
+    word: str
+    translation: str
+    example: str | None = None
+    example_translation: str | None = None
+    quality: int
+    repeat_in_session: bool
+    next_exercise: Exercise | None = None
+
+
+class GroupFinishRequest(BaseModel):
+    session_id: str
+
+
+class GroupFinishResult(BaseModel):
+    """Слово, прошедшее все раунды порции: оно отмечено пройденным в своём круге."""
+
+    word_id: int
+    mistakes: int
+
+
 # --------------------------------------------------------------------- статистика
 
 

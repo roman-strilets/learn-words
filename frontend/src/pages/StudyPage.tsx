@@ -1,10 +1,10 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router'
 
 import { deckApi, queryKeys } from '../api/client'
 import type { Deck, StudyMode } from '../api/types'
-import { RoundsRunner } from '../components/RoundsRunner'
+import { RoundsRunner, type RoundsApi } from '../components/RoundsRunner'
 import { StudySession } from '../components/StudySession'
 import { StudyModeLinks, modeLabel, studyPath } from '../components/StudyModeLinks'
 import { DECK_TEXT } from '../lib/deck'
@@ -71,6 +71,15 @@ export function StudyPage() {
   const keys = queryKeys(deck)
   const queryClient = useQueryClient()
   const [summary, setSummary] = useState<Summary | null>(null)
+  // Маршруты повторения для раннера; один объект, пока не сменились колода и режим
+  const roundsApi = useMemo<RoundsApi | null>(() => {
+    if (!mode) return null
+    const client = deckApi(deck)
+    return {
+      answer: (payload) => client.answer({ ...payload, mode }),
+      finish: (id) => client.finishSession(id, mode),
+    }
+  }, [deck, mode])
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ['session', deck, mode],
@@ -169,13 +178,12 @@ export function StudyPage() {
   // и лишь потом запрашивает раунды, «Повторение» получает их вместе
   // с занятием и идёт в раннер сразу.
   // key: при смене режима или колоды очередь и счётчики должны собраться заново
-  return mode === 'review' ? (
+  return mode === 'review' && roundsApi ? (
     <RoundsRunner
       key={`${deck}:${mode}`}
-      deck={deck}
+      api={roundsApi}
       rounds={data.rounds}
       sessionId={data.session_id}
-      mode={mode}
       onFinished={handleFinished}
     />
   ) : (

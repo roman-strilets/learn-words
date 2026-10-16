@@ -2,6 +2,7 @@ import { NavLink, Route, Routes } from 'react-router'
 
 import { AddPhrasePage } from './pages/AddPhrasePage'
 import { AddWordPage } from './pages/AddWordPage'
+import { GroupStudyPage } from './pages/GroupStudyPage'
 import { HomePage } from './pages/HomePage'
 import { PhrasesPage } from './pages/PhrasesPage'
 import { SettingsPage } from './pages/SettingsPage'
@@ -45,6 +46,7 @@ export function App() {
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/study" element={<StudyPage />} />
+          <Route path="/study/group" element={<GroupStudyPage />} />
           <Route path="/words" element={<WordsPage />} />
           <Route path="/words/new" element={<AddWordPage />} />
           <Route path="/phrases" element={<PhrasesPage />} />

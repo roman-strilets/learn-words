@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import { useMutation } from '@tanstack/react-query'
 
 import { deckApi } from '../api/client'
 import type { Deck, ExerciseRound, SessionPayload, Word } from '../api/types'
-import { RoundsRunner } from './RoundsRunner'
+import { RoundsRunner, type RoundsApi } from './RoundsRunner'
 import { IntroCard } from './exercises/IntroCard'
 import { Button, ErrorBox, Spinner } from './ui'
 
@@ -25,7 +25,15 @@ interface Props {
  * тот же `RoundsRunner`, что и повторение.
  */
 export function StudySession({ deck = 'words', session, sessionId, onFinished }: Props) {
-  const client = deckApi(deck)
+  const client = useMemo(() => deckApi(deck), [deck])
+  // Раннеру — маршруты изучения; один объект на всё занятие, а не на рендер
+  const roundsApi = useMemo<RoundsApi>(
+    () => ({
+      answer: (payload) => client.answer({ ...payload, mode: 'learn' }),
+      finish: (id) => client.finishSession(id, 'learn'),
+    }),
+    [client],
+  )
   const [introIndex, setIntroIndex] = useState(0)
   // Список знакомства пополняется на ходу: «Уже знаю» добирает слово взамен
   const [introWords, setIntroWords] = useState<Word[]>(session.new_words)
@@ -104,10 +112,9 @@ export function StudySession({ deck = 'words', session, sessionId, onFinished }:
     if (rounds && rounds.length > 0) {
       return (
         <RoundsRunner
-          deck={deck}
+          api={roundsApi}
           rounds={rounds}
           sessionId={sessionId}
-          mode="learn"
           onFinished={onFinished}
         />
       )

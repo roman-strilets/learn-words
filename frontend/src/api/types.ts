@@ -237,6 +237,62 @@ export interface SessionFinishResult {
   progress: Progress
 }
 
+/** Метка слов в выборе группы: размер и место в текущем круге. */
+export interface GroupSummary {
+  label_id: number
+  name: string
+  /** Слова с этой меткой в любом статусе */
+  word_count: number
+  /** Пройдено в текущем круге, 0..word_count */
+  done: number
+  /** Номер текущего круга; 0 — по группе ещё не занимались */
+  cycle: number
+}
+
+/** Порция занятия по группе: пять раундов без знакомства. */
+export interface GroupSessionPayload {
+  label_id: number
+  name: string
+  /** null — в группе нет слов, занятия нет */
+  session_id: string | null
+  rounds: ExerciseRound[]
+  word_count: number
+  /** Пройдено в текущем круге до этого занятия */
+  done: number
+  cycle: number
+}
+
+export interface GroupAnswerPayload {
+  word_id: number
+  label_id: number
+  session_id: string
+  /** Кроме `intro` — иначе сервер ответит 422 */
+  exercise: ExerciseType
+  answer: string | null
+  used_hint?: boolean
+  attempt?: number
+  duration_ms?: number
+}
+
+/** Поля `AnswerResponse` без прогресса: занятие по группе его не трогает. */
+export interface GroupAnswerResponse {
+  correct: boolean
+  correct_answer: string
+  word: string
+  translation: string
+  example: string | null
+  example_translation: string | null
+  quality: number
+  repeat_in_session: boolean
+  next_exercise: Exercise | null
+}
+
+/** Слово, прошедшее все раунды порции и отмеченное пройденным в своём круге. */
+export interface GroupFinishResult {
+  word_id: number
+  mistakes: number
+}
+
 export interface StatsOverview {
   total_words: number
   new: number

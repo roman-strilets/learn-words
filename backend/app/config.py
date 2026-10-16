@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     new_phrases_per_session: int = 5
     review_phrases_per_session: int = 5
     daily_new_phrases_limit: int = 20
+    # Порция занятия по группе (по метке) — своя, не из обычных занятий:
+    # дневного лимита у него нет, расписание и лимит новых оно не трогает
+    group_words_per_session: int = 5
 
     # Границы SM-2
     max_interval_days: float = 365.0

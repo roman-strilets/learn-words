@@ -1,15 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 
-import { ApiError, deckApi } from '../api/client'
-import type {
-  AnswerResponse,
-  Deck,
-  Exercise,
-  ExerciseRound,
-  ExerciseType,
-  StudyMode,
-} from '../api/types'
+import { ApiError } from '../api/client'
+import type { Exercise, ExerciseRound, ExerciseType } from '../api/types'
 import { arrangeRound } from '../lib/roundOrder'
 import { ExerciseView } from './exercises/ExerciseView'
 import { Feedback } from './exercises/Feedback'
@@ -26,13 +19,44 @@ const EXERCISE_LABEL: Record<ExerciseType, string> = {
   dictation: 'Аудирование',
 }
 
+/** Общая часть ответа на карточку у всех занятий, которые ведёт раннер. */
+export interface RoundAnswer {
+  word_id: number
+  exercise: ExerciseType
+  answer: string | null
+  used_hint: boolean
+  attempt: number
+  duration_ms: number
+  session_id: string
+}
+
+/** Общая часть ответа сервера: то, что раннеру нужно для плашки и повтора. */
+export interface RoundFeedback {
+  correct: boolean
+  word: string
+  translation: string
+  example: string | null
+  example_translation: string | null
+  next_exercise: Exercise | null
+}
+
+/**
+ * Куда раннер отправляет ответы и итог. Обычные занятия собирают его из
+ * колоды и режима, занятие по группе — из своих маршрутов: правила раундов
+ * от этого не меняются.
+ */
+export interface RoundsApi {
+  answer: (payload: RoundAnswer) => Promise<RoundFeedback>
+  finish: (sessionId: string) => Promise<unknown>
+}
+
 interface Props {
-  /** Колода занятия: от неё зависят только маршруты API */
-  deck?: Deck
+  api: RoundsApi
   rounds: ExerciseRound[]
   sessionId: string
-  mode: StudyMode
   onFinished: (summary: { answered: number; correct: number }) => void
+  /** Что сказать, если итог не записался: у занятий он значит разное */
+  finishErrorText?: string
 }
 
 /** Слово выбыло из занятия: его вывели из оборота или удалили из словаря. */
@@ -54,8 +78,13 @@ function isGone(error: unknown): boolean {
  * выбывшее слово может сделать два разных серверных порядка одинаковыми
  * (`[a, b, c]` и `[a, c, b]` без `c`).
  */
-export function RoundsRunner({ deck = 'words', rounds, sessionId, mode, onFinished }: Props) {
-  const client = deckApi(deck)
+export function RoundsRunner({
+  api,
+  rounds,
+  sessionId,
+  onFinished,
+  finishErrorText = 'Ответы занятия сохранены, но расписание слов ещё не пересчитано.',
+}: Props) {
   const [roundIndex, setRoundIndex] = useState(0)
   const [queue, setQueue] = useState<Exercise[]>(() => rounds[0]?.exercises ?? [])
   // Порядок первых показов текущего раунда — так, как он показан.
@@ -67,7 +96,7 @@ export function RoundsRunner({ deck = 'words', rounds, sessionId, mode, onFinish
   // конец раунда, а последним мог оказаться повтор после ошибки (FR-004).
   // Выбывшее слово здесь может остаться: в следующем раунде его всё равно нет.
   const [lastWordId, setLastWordId] = useState<number | null>(null)
-  const [feedback, setFeedback] = useState<AnswerResponse | null>(null)
+  const [feedback, setFeedback] = useState<RoundFeedback | null>(null)
   const [tally, setTally] = useState({ answered: 0, correct: 0 })
   // Номер показа слова в текущем раунде: 1 на первом показе, +1 на каждый
   // повтор после ошибки. На границе раунда счёт начинается заново (FR-012a).
@@ -93,12 +122,12 @@ export function RoundsRunner({ deck = 'words', rounds, sessionId, mode, onFinish
   // Итог занятия показываем только после ответа сервера: если пересчёт не
   // прошёл, вся работа занятия пропала бы молча — лучше дать повторить.
   const finishMutation = useMutation({
-    mutationFn: (id: string) => client.finishSession(id, mode),
+    mutationFn: api.finish,
     onSuccess: () => onFinished(tally),
   })
 
   const answerMutation = useMutation({
-    mutationFn: client.answer,
+    mutationFn: api.answer,
     onSuccess: (data) => {
       setTally((value) => ({
         answered: value.answered + 1,
@@ -178,11 +207,10 @@ export function RoundsRunner({ deck = 'words', rounds, sessionId, mode, onFinish
         // «взято не с первой попытки», поэтому берём большее из двух
         attempt: Math.max(shows[current.word_id] ?? 1, attempt ?? 1),
         duration_ms: Date.now() - startedAt.current,
-        mode,
         session_id: sessionId,
       })
     },
-    [current, answerMutation, shows, mode, sessionId],
+    [current, answerMutation, shows, sessionId],
   )
 
   // Объём работы: остаток текущего раунда плюс раунды впереди. Повтор после
@@ -202,9 +230,7 @@ export function RoundsRunner({ deck = 'words', rounds, sessionId, mode, onFinish
       return (
         <div className="flex flex-col items-center gap-6">
           <ErrorBox message={(finishMutation.error as Error).message} />
-          <p className="max-w-md text-center text-muted">
-            Ответы занятия сохранены, но расписание слов ещё не пересчитано.
-          </p>
+          <p className="max-w-md text-center text-muted">{finishErrorText}</p>
           <Button onClick={() => finish(sessionId)}>Повторить</Button>
         </div>
       )
